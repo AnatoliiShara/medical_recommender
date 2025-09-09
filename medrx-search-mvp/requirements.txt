@@ -1,0 +1,15 @@
+pandas
+pyarrow
+jupyter
+ipykernel
+scikit-learn
+sentence-transformers
+faiss-cpu
+rank-bm25
+uvicorn
+fastapi
+python-dotenv
+unidecode
+spacy
+stanza
+opensearch-py
