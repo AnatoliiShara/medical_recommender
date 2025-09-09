@@ -1,0 +1,34 @@
+text_fields:
+  name: "Назва препарату"
+  indications: "Показання"
+  contraind: "Протипоказання"
+  group: "Фармакотерапевтична група"
+  composition: "Склад"
+  url: "url"
+
+concat:
+  order: ["name", "indications", "contraind", "group", "composition"]
+  tags: true           # [NAME] [INDICATIONS] ...
+  weight_indications: 2  # дублювати показання для вагування
+
+chunking:
+  by_fields: true
+  max_tokens: 256
+
+index:
+  vector:
+    dim: 768
+    faiss:
+      type: "HNSW"
+      M: 32
+      efConstruction: 200
+      efSearch: 128
+  bm25:
+    backend: "opensearch"   # або "local"
+    top_k: 200
+
+ranker:
+  rrf:
+    k: 60
+  cross_encoder:
+    enabled: false   # на етапі MVP можна вимкнути, включимо пізніше
