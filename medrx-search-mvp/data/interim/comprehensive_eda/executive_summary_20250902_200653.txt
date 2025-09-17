@@ -1,0 +1,38 @@
+MEDICAL DATASET COMPREHENSIVE EDA - EXECUTIVE SUMMARY
+============================================================
+Analysis Date: 2025-09-02 20:06:53
+Dataset: data/raw/compendium_all.parquet
+
+DATASET OVERVIEW:
+  Records: 28,379
+  Columns: 19
+  Memory: 908.99 MB
+  Duplicates: 0
+
+FIELD COMPLETENESS (Top 5):
+  url: 100.0%
+  Назва препарату: 98.4%
+  Склад: 27.5%
+  Умови зберігання: 25.0%
+  Протипоказання: 24.5%
+
+ML TRAINING READINESS:
+  Potential training pairs: 31,104
+  name_only: 27,914 records (98.4%)
+  name_indications: 6,078 records (21.4%)
+  name_group_indications: 3,465 records (12.2%)
+  name_indications_contraindications: 6,011 records (21.2%)
+
+KEY RECOMMENDATIONS:
+  DATA_PREPROCESSING:
+    - WARNING: Very few fields have >50% meaningful content. Consider data augmentation.
+    - Focus on 2 high-quality fields: url, Назва препарату
+
+  ML_STRATEGY:
+    - Sufficient training data potential: 31,104 pairs for MNRL fine-tuning
+
+  ARCHITECTURE:
+    - Heavy processing fields detected: Особливості застосування, Фармакологічні властивості, Взаємодія з іншими лікарськими засобами та інші види взаємодій, Побічні реакції, Протипоказання, Спосіб застосування та дози, Передозування, Склад, Показання, Фармакотерапевтична група, Здатність впливати на швидкість реакції при керуванні автотранспортом або іншими механізмами, Застосування у період вагітності або годування груддю, Умови зберігання, Лікарська форма, Упаковка, Виробник, Термін придатності, Назва препарату, url. Consider field prioritization.
+
+  PERFORMANCE:
+    - High token volume detected. Consider batch processing and efficient tokenization.
