@@ -1,0 +1,62 @@
+{
+  "original_records": 28379,
+  "medical_records": 21902,
+  "high_quality_records": 5198,
+  "field_stats": {
+    "Назва препарату": {
+      "exists": true,
+      "total_records": 21902,
+      "non_empty_count": "21546",
+      "non_empty_percentage": 98.37457766414026,
+      "avg_length": 46.0200965376404
+    },
+    "Показання": {
+      "exists": true,
+      "total_records": 21902,
+      "non_empty_count": "5198",
+      "non_empty_percentage": 23.732992420783493,
+      "avg_length": 3082.8089649865333
+    },
+    "Протипоказання": {
+      "exists": true,
+      "total_records": 21902,
+      "non_empty_count": "5726",
+      "non_empty_percentage": 26.14373116610355,
+      "avg_length": 3871.1390150192105
+    },
+    "Фармакотерапевтична група": {
+      "exists": true,
+      "total_records": 21902,
+      "non_empty_count": "2714",
+      "non_empty_percentage": 12.39156241439138,
+      "avg_length": 3456.982313927782
+    }
+  },
+  "truncation_stats": {
+    "Показання": {
+      "max_chars": 1200,
+      "truncated_records": "3400",
+      "truncated_percentage": 65.4097729896114
+    },
+    "Протипоказання": {
+      "max_chars": 800,
+      "truncated_records": "4301",
+      "truncated_percentage": 82.7433628318584
+    },
+    "Фармакотерапевтична група": {
+      "max_chars": 400,
+      "truncated_records": "2566",
+      "truncated_percentage": 49.36514043863024
+    },
+    "Склад": {
+      "max_chars": 600,
+      "truncated_records": "4713",
+      "truncated_percentage": 90.6694882647172
+    },
+    "Фармакологічні властивості": {
+      "max_chars": 1000,
+      "truncated_records": "4603",
+      "truncated_percentage": 88.55328972681801
+    }
+  }
+}
