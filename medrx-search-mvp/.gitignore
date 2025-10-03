@@ -20,3 +20,10 @@ data/eval/runs/**
 # checkpoints / caches (на всяк випадок)
 **/__pycache__/
 .cache/
+data/processed/**
+data/eval/runs/**
+*.index
+*.npy
+*.parquet
+**/__pycache__/
+.cache/
