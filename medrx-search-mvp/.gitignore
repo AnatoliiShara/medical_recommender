@@ -3,27 +3,13 @@ __pycache__/
 *.pyc
 venv/
 .env
+.cache/
 
-# Large files
-data/raw/
-models/medical-search-ua-*/
-data/processed/training/
-*.parquet
-*.jsonl
-# artifacts & indices
+# Artifacts / runs
 data/processed/**
 data/eval/runs/**
-*.index
-*.npy
-*.parquet
 
-# checkpoints / caches (на всяк випадок)
-**/__pycache__/
-.cache/
-data/processed/**
-data/eval/runs/**
+# Heavy formats (про всяк випадок)
+*.parquet
 *.index
 *.npy
-*.parquet
-**/__pycache__/
-.cache/
