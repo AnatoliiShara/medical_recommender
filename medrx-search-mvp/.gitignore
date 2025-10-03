@@ -10,3 +10,13 @@ models/medical-search-ua-*/
 data/processed/training/
 *.parquet
 *.jsonl
+# artifacts & indices
+data/processed/**
+data/eval/runs/**
+*.index
+*.npy
+*.parquet
+
+# checkpoints / caches (на всяк випадок)
+**/__pycache__/
+.cache/
