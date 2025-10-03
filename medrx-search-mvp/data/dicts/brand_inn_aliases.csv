@@ -2,191 +2,376 @@ alias,target,type
 стоперан,loperamide,brand2inn
 лоперамід,loperamide,inn
 лоперамід-здоров'я,loperamide,brand2inn
+лоперамид,loperamide,inn
 loperaмide,loperamide,typo
+
 enterol,saccharomyces boulardii,brand2inn
 ентерол,saccharomyces boulardii,brand2inn
+энтерол,saccharomyces boulardii,brand2inn
+saccharomyces boulardii,saccharomyces boulardii,inn
+
 нифуроксазид,nifuroxazide,inn
 нифуроксазид-здоров'я,nifuroxazide,brand2inn
+
 ібупрофен,ibuprofen,inn
 ибупрофен,ibuprofen,inn
-omeprazole,omeprazole,inn
+ibuprofen,ibuprofen,inn
+нурофен,ibuprofen,brand2inn
+нурофен експрес,ibuprofen,brand2inn
+нурофен форте,ibuprofen,brand2inn
+
 омепразол,omeprazole,inn
+omeprazole,omeprazole,inn
+омез,omeprazole,brand2inn
+ulcamed,omeprazole,brand2inn
+
 офлоксацин,ofloxacin,inn
-акс,acetylcysteine,alias
+
 ацетилцистеїн,acetylcysteine,inn
+ацц,acetylcysteine,brand2inn
+acc,acetylcysteine,brand2inn
+акс,acetylcysteine,alias
+
+цетиризин,cetirizine,inn
 цетрин,cetirizine,brand2inn
 лоратадин,loratadine,inn
+кларитин,loratadine,brand2inn
+
+телмісартан,telmisartan,inn
 телсартан,telmisartan,brand2inn
+мікардис,telmisartan,brand2inn
+
+дапагліфлозин,dapagliflozin,inn
 форксіга,dapagliflozin,brand2inn
+саксагліптин,saxagliptin,inn
 онгліза,saxagliptin,brand2inn
+тразодон,trazodone,inn
 триттіко,trazodone,brand2inn
+тріттіко,trazodone,brand2inn
+
 парацетамол,paracetamol,inn
+paracetamol,paracetamol,inn
 панадол,paracetamol,brand2inn
-paracetamol,paracetamol,typo
-аспірин,acetylsalicylic acid,brand2inn
+панадол бебі,paracetamol,brand2inn
+ефералган,paracetamol,brand2inn
+
 ацетилсаліцилова кислота,acetylsalicylic acid,inn
+аспірин,acetylsalicylic acid,brand2inn
+aspirin,acetylsalicylic acid,inn
+
 амлодипін,amlodipine,inn
 норваск,amlodipine,brand2inn
-enalapril,enalapril,inn
+
+еналаприл,enalapril,inn
 еналаприл,enalapril,inn
 енап,enalapril,brand2inn
+
 діосмектит,diosmectite,inn
 смекта,diosmectite,brand2inn
-diosmektit,diosmectite,typo
+
+оральні регідратаційні солі,oral rehydration salts,alias
 регідрон,oral rehydration salts,brand2inn
 орс,oral rehydration salts,alias
+
 диклофенак,diclofenac,inn
 вольтарен,diclofenac,brand2inn
-dicklofenak,diclofenac,typo
+диклак,diclofenac,brand2inn
+
 метформін,metformin,inn
 сіофор,metformin,brand2inn
+глюкофаж,metformin,brand2inn
+
 азитроміцин,azithromycin,inn
 сумамед,azithromycin,brand2inn
 azitromycin,azithromycin,typo
+
 панкреатин,pancreatin,inn
 креон,pancreatin,brand2inn
 мезим,pancreatin,brand2inn
+фестал,pancreatin,brand2inn
+
 левотироксин,levothyroxine,inn
 l-тироксин,levothyroxine,brand2inn
+еутирокс,levothyroxine,brand2inn
 eutirox,levothyroxine,brand2inn
+
 мелатонін,melatonin,inn
-мелатон,melatonin,typo
+melatonin,melatonin,inn
+
 бісопролол,bisoprolol,inn
 конкор,bisoprolol,brand2inn
-детралекс,diosmin,brand2inn
+
 діосмін,diosmin,inn
+детралекс,diosmin + hesperidin,brand2inn
+діосмін + гесперидин,diosmin + hesperidin,inn
+флебодіа,diosmin,brand2inn
+
 ципрофлоксацин,ciprofloxacin,inn
 ципробай,ciprofloxacin,brand2inn
-ciprofloxacin,ciprofloxacin,typo
-атоксіл,enterosorbent,brand2inn
-ентеросгель,enterosorbent,brand2inn
+
+ентеросгель,polymethylsiloxane polyhydrate,brand2inn
+атоксіл,polymethylsiloxane polyhydrate,brand2inn
+
 валсартан,valsartan,inn
 діован,valsartan,brand2inn
-valsartan,valsartan,typo
+
 лізиноприл,lisinopril,inn
 диротон,lisinopril,brand2inn
+
 гідрохлортіазид,hydrochlorothiazide,inn
 гіпотіазид,hydrochlorothiazide,brand2inn
 hctz,hydrochlorothiazide,alias
+
 амоксицилін,amoxicillin,inn
 флемоксин,amoxicillin,brand2inn
-amoxycillin,amoxicillin,typo
+
 цефтріаксон,ceftriaxone,inn
 роцефін,ceftriaxone,brand2inn
-ceftriaxon,ceftriaxone,typo
+
 доксициклін,doxycycline,inn
 юнілдокс,doxycycline,brand2inn
-doxycyclin,doxycycline,typo
+
 фексофенадин,fexofenadine,inn
 телфаст,fexofenadine,brand2inn
+
 амброксол,ambroxol,inn
 амбробене,ambroxol,brand2inn
-ambroxole,ambroxol,typo
+лазолван,ambroxol,brand2inn
+
 гліклазид,gliclazide,inn
 діабетон,gliclazide,brand2inn
-gliclazid,gliclazide,typo
+
 ністатин,nystatin,inn
-ністатинова мазь,nystatin,brand2inn
-nystatine,nystatin,typo
+
 клотримазол,clotrimazole,inn
 кандид,clotrimazole,brand2inn
-clotrimazol,clotrimazole,typo
+
 індапамід,indapamide,inn
 арифон,indapamide,brand2inn
-indapamid,indapamide,typo
+
 аторвастатин,atorvastatin,inn
 ліпітор,atorvastatin,brand2inn
-atorvastatine,atorvastatin,typo
+
 симвастатин,simvastatin,inn
 вазатор,simvastatin,brand2inn
-simvastatine,simvastatin,typo
+
 кеторолак,ketorolac,inn
 кетанов,ketorolac,brand2inn
-ketorolak,ketorolac,typo
+
 напроксен,naproxen,inn
 налігезін,naproxen,brand2inn
-naproxene,naproxen,typo
+
 фамотидин,famotidine,inn
 квамател,famotidine,brand2inn
-famotidin,famotidine,typo
+
 ранітидин,ranitidine,inn
 зантак,ranitidine,brand2inn
-ranitidin,ranitidine,typo
+
 дротаверин,drotaverine,inn
 но-шпа,drotaverine,brand2inn
-drotaverin,drotaverine,typo
+ношпа,drotaverine,brand2inn
+
 мебеверин,mebeverine,inn
 дюспаталін,mebeverine,brand2inn
-mebeverin,mebeverine,typo
+
 монтелукаст,montelukast,inn
 сінгуляр,montelukast,brand2inn
-montelukaste,montelukast,typo
+
 сальбутамол,salbutamol,inn
 вентолін,salbutamol,brand2inn
-salbutamole,salbutamol,typo
+
 будесонід,budesonide,inn
 пульмікорт,budesonide,brand2inn
-budesonide,budesonide,typo
+новопульмон,budesonide,brand2inn
+будіксон,budesonide,brand2inn
+
 троксерутин,troxerutin,inn
 троксевазин,troxerutin,brand2inn
-troxerutine,troxerutin,typo
+
 гесперидин,hesperidin,inn
-венорутон,hesperidin,brand2inn
-hesperidine,hesperidin,typo
+венорутон,oxerutins,brand2inn
+
 мометазон,mometasone,inn
 назонекс,mometasone,brand2inn
-mometason,mometasone,typo
+
 бетаметазон,betamethasone,inn
-целестодерм,betamethasone,brand2inn
-betamethason,betamethasone,typo
+дипроспан,betamethasone,brand2inn
+celestone,betamethasone,brand2inn
+
 адапален,adapalene,inn
 дифферін,adapalene,brand2inn
-adapalen,adapalene,typo
+
 ізотретиноїн,isotretinoin,inn
 роаккутан,isotretinoin,brand2inn
-isotretinoine,isotretinoin,typo
+
 силденафіл,sildenafil,inn
 віагра,sildenafil,brand2inn
-sildenafile,sildenafil,typo
+
 тадалафіл,tadalafil,inn
 сіаліс,tadalafil,brand2inn
-tadalafile,tadalafil,typo
-уродезоксихолева кислота,ursodeoxycholic acid,inn
+
+урсодезоксихолева кислота,ursodeoxycholic acid,inn
 урсофальк,ursodeoxycholic acid,brand2inn
-ursodeoxycholic,ursodeoxycholic acid,typo
+
 адеметіонін,ademetionine,inn
 гептрал,ademetionine,brand2inn
-ademetionine,ademetionine,typo
+
 месалазин,mesalazine,inn
 салофальк,mesalazine,brand2inn
-mesalazin,mesalazine,typo
+
 лактулоза,lactulose,inn
 дюфалак,lactulose,brand2inn
-lactulos,lactulose,typo
+
 домперидон,domperidone,inn
 мотиліум,domperidone,brand2inn
-domperidon,domperidone,typo
+
 ондансетрон,ondansetron,inn
 емесет,ondansetron,brand2inn
-ondansetrone,ondansetron,typo
+
 суматриптан,sumatriptan,inn
 імігран,sumatriptan,brand2inn
-sumatriptane,sumatriptan,typo
+
 сертралін,sertraline,inn
 золофт,sertraline,brand2inn
-sertralin,sertraline,typo
+
 флуоксетин,fluoxetine,inn
 прозак,fluoxetine,brand2inn
-fluoxetin,fluoxetine,typo
+
 вальпроєва кислота,valproic acid,inn
 депакін,valproic acid,brand2inn
-valproic,valproic acid,typo
+
 карбамазепін,carbamazepine,inn
 тегретол,carbamazepine,brand2inn
-carbamazepin,carbamazepine,typo
-левопа,levodopa,alias
+
 леводопа,levodopa,inn
-мадопар,levodopa,brand2inn
+мадопар,levodopa + benserazide,brand2inn
+сінемет,levodopa + carbidopa,brand2inn
+левопа,levodopa,alias
+
 донепезил,donepezil,inn
 арицепт,donepezil,brand2inn
-donepezile,donepezil,typo
+
+беклометазон,beclometasone,inn
+беклазон,beclometasone,brand2inn
+беклофорт,beclometasone,brand2inn
+
+budesonide,budesonide,inn
+budenofalk,budesonide,brand2inn
+будесонід-інтелі,budesonide,brand2inn
+пульмікорт турбухалер,budesonide,brand2inn
+
+фенотерол,fenoterol,inn
+беротек,fenoterol,brand2inn
+беровент,fenoterol,brand2inn
+
+хлорпромазин,chlorpromazine,inn
+амізин (аминазин),chlorpromazine,brand2inn
+аминазин,chlorpromazine,brand2inn
+
+галоперидол,haloperidol,inn
+
+глімепірид,glimepiride,inn
+амарил,glimepiride,brand2inn
+мелпамід,glimepiride,brand2inn
+олтар,glimepiride,brand2inn
+
+глімепірид / метформін,glimepiride + metformin,inn
+амарил м,glimepiride + metformin,brand2inn
+дуглімакс,glimepiride + metformin,brand2inn
+
+метформін / глібенкламід,metformin + glibenclamide,inn
+глібомет,metformin + glibenclamide,brand2inn
+глібофор,metformin + glibenclamide,brand2inn
+
+метформін / гліклазид,metformin + gliclazide,inn
+діанорм-м,metformin + gliclazide,brand2inn
+
+ситагліптин / метформін,sitagliptin + metformin,inn
+янумет,sitagliptin + metformin,brand2inn
+
+вілдагліптин / метформін,vildagliptin + metformin,inn
+айглімед,vildagliptin + metformin,brand2inn
+гальвусмет,vildagliptin + metformin,brand2inn
+
+саксагліптин / метформін,saxagliptin + metformin,inn
+комбогліза xr,saxagliptin + metformin,brand2inn
+
+квінаприл / гідрохлортіазид,quinapril + hydrochlorothiazide,inn
+аккузид,quinapril + hydrochlorothiazide,brand2inn
+
+зофеноприл / гідрохлортіазид,zofenopril + hydrochlorothiazide,inn
+зокардіс плюс,zofenopril + hydrochlorothiazide,brand2inn
+
+еналаприл / лерканідипін,enalapril + lercanidipine,inn
+коріпрен,enalapril + lercanidipine,brand2inn
+
+амлодипін / лізиноприл,amlodipine + lisinopril,inn
+екватор,amlodipine + lisinopril,brand2inn
+амліпін,amlodipine + lisinopril,brand2inn
+
+периндоприл / амлодипін,perindopril + amlodipine,inn
+амлеса,perindopril + amlodipine,brand2inn
+бі-престаріум,perindopril + amlodipine,brand2inn
+віакорам,perindopril + amlodipine,brand2inn
+
+мірамістин,miramistin,inn
+хлоргексидин,chlorhexidine,inn
+chlorhexidine,chlorhexidine,inn
+
+парацетамол + ацетилсаліцилова кислота + кофеїн,paracetamol + acetylsalicylic acid + caffeine,inn
+цитрамон,paracetamol + acetylsalicylic acid + caffeine,brand2inn
+цитрамон п,paracetamol + acetylsalicylic acid + caffeine,brand2inn
+
+димексид,dimethyl sulfoxide,brand2inn
+диметилсульфоксид,dimethyl sulfoxide,inn
+
+но-шпа,drotaverine,brand2inn
+ношпа,drotaverine,brand2inn
+но-шпа форте,drotaverine,brand2inn
+
+афобазол,fabomotizole,brand2inn
+фабомотизол,fabomotizole,inn
+
+мексидол,emoxypine,brand2inn
+емоксипін,emoxypine,inn
+
+креон,pancreatin,brand2inn
+мезим,pancreatin,brand2inn
+фестал,pancreatin,brand2inn
+
+супрастин,chloropyramine,brand2inn
+хлоропірамін,chloropyramine,inn
+
+анальгін,metamizole,brand2inn
+метамізол,metamizole,inn
+
+реліф,phenylephrine (rectal),brand2inn
+реліф адванс,benzocaine (rectal),brand2inn
+реліф ультра,hydrocortisone + zinc sulfate,brand2inn
+
+албуцид,sulfacetamide,brand2inn
+сульфацидамід,sulfacetamide,inn
+
+карсил,silymarin,brand2inn
+силімарин,silymarin,inn
+
+меновазин,menthol + procaine + benzocaine,brand2inn
+
+валідол,menthyl isovalerate,brand2inn
+menthyl isovalerate,menthyl isovalerate,inn
+
+папазол,papaverine + dibazol,brand2inn
+папаверин,papaverine,inn
+
+еспумізан,simethicone,brand2inn
+симетикон,simethicone,inn
+
+синупрет,sinupret extract,brand2inn
+синупрет екстракт,sinupret extract,brand2inn
+
+канефрон,canephron extract,brand2inn
+канефрон н,canephron extract,brand2inn
+
+тридерм,betamethasone + clotrimazole + gentamicin,brand2inn
+елідел,pimecrolimus,brand2inn
+пімекролімус,pimecrolimus,inn

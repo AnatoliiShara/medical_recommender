@@ -1,0 +1,22 @@
+{
+  "query": "порадьте препарати від головного болю",
+  "intent": "indication",
+  "policy": {
+    "doc_topN": 400,
+    "k": 300,
+    "gate": {
+      "mode": "none",
+      "sections": []
+    },
+    "ce_top": 200,
+    "ce_min": 0.15,
+    "ce_weight": 0.75
+  },
+  "final_doc_ids": [
+    5297,
+    729,
+    5087,
+    722,
+    4459
+  ]
+}
