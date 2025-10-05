@@ -61,7 +61,6 @@ python src/api/medical_search_api.py
 ### Дані
 Проект використовує дані з compendium.com.ua (українська медична база даних).
 Через обмеження GitHub, великі файли не включені в репозиторій:
-
 Вихідні дані: ~228MB
-Trained models: ~480MB каждая
+Trained models: ~480MB кожна
 Training pairs: ~87MB
