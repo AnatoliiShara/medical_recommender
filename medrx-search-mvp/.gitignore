@@ -13,3 +13,51 @@ data/eval/runs/**
 *.parquet
 *.index
 *.npy
+cat > .gitignore << 'EOF'
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+env/
+*.egg-info/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# MODELS (ДУЖЕ ВЕЛИКІ - НЕ ДЛЯ GIT!)
+models/
+*.safetensors
+*.bin
+*.onnx
+*.pt
+*.pth
+
+# Artifacts and training outputs
+artifacts_backup/
+runs/
+checkpoints/
+*.log
+stdout.log
+
+# Large data files
+data/interim/
+*.parquet
+*.pkl
+*.pickle
+
+# Evaluation runs
+data/eval/runs_*/
+data/eval/baselines/*/
+
+# Temp files
+*.tmp
+*.bak
+.DS_Store
+EOF
+
+git add .gitignore

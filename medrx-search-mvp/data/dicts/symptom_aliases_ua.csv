@@ -1,0 +1,140 @@
+canon_symptom,aliases,intent_hint
+печія,ізжога|печіння у шлунку|печіння за грудиною|heartburn,indications
+головний біль,головний біль|цефалгія|біль голови|мігрень|headache,side_effects
+нежить,ринорея|соплі|слиз з носа|течія з носа|runny nose|насморк,indications
+кашель,кашель|покашлювання|cough,indications
+задишка,утруднене дихання|важко дихати|не вистачає повітря|dyspnea|задуха,indications
+біль у горлі,біль при ковтанні|біль в горлі|горло болить|sore throat,indications
+температура,жар|лихоманка|гарячка|fever|підвищена температура,indications
+нудота,нудить|підташнює|нудота|nausea,side_effects
+блювання,блювота|рвота|vomiting,side_effects
+діарея,пронос|рідкий стілець|послаблений стілець|diarrhea,side_effects
+запор,закреп|затвердіння стільця|constipation,side_effects
+біль у животі,біль живота|болить живіт|абдомінальний біль|abdominal pain,indications
+біль у спині,біль спини|болить спина|back pain,indications
+біль у суглобах,болять суглоби|артралгія|біль в суглобах|joint pain,indications
+біль у м'язах,болять м'язи|міалгія|м'язовий біль|muscle pain,side_effects
+запаморочення,паморочиться голова|крутиться голова|дизиніс|dizziness|vertigo,side_effects
+слабкість,загальна слабість|астенія|втома|weakness|fatigue,side_effects
+втома,втомлюваність|астенія|слабкість|fatigue,general
+безсоння,не можу заснути|порушення сну|insomnia,side_effects
+сонливість,хочеться спати|дрімота|drowsiness|sleepiness,side_effects
+свербіж,сверблячка|свербить шкіра|itching|pruritus,side_effects
+висип,висипка|шкірна висипка|плями на шкірі|rash,side_effects
+кропивниця,кропив'янка|urticaria,side_effects
+набряк,набряки|опухлість|отечність|edema|swelling,side_effects
+серцебиття,прискорене серцебиття|тахікардія|palpitations,side_effects
+біль у грудях,біль в грудях|стиснення в грудях|chest pain,indications
+кровотеча,кровоточивість|bleeding,indications
+синці,синяки|гематоми|bruising,side_effects
+блідість,бліда шкіра|pallor,general
+жовтяниця,жовте забарвлення шкіри|icterus|jaundice,indications
+пітливість,підвищена пітливість|потіння|sweating|hyperhidrosis,side_effects
+озноб,знобить|трясе|chills,indications
+втрата апетиту,немає апетиту|анорексія|loss of appetite,side_effects
+підвищений апетит,постійний голод|повіфагія|increased appetite,side_effects
+втрата ваги,схуднення|weight loss,general
+набір ваги,збільшення ваги|поправився|weight gain,side_effects
+біль при сечовипусканні,пече при сечовипусканні|болить при сечовипусканні|painful urination,indications
+часте сечовипускання,часто бігаю в туалет|поллакіурія|frequent urination,indications
+утруднене сечовипускання,важко пісяти|дизурія|difficulty urinating,indications
+кров у сечі,кров в сечі|гематурія|blood in urine,indications
+кров у калі,кров в калі|кров зі стільцем|blood in stool,indications
+здуття живота,роздутий живіт|метеоризм|bloating,indications
+відрижка,відригування|burping|belching,indications
+сухість у роті,сухо в роті|сухість рота|dry mouth,side_effects
+посилене слиновиділення,багато слини|слинотеча|excessive salivation,side_effects
+порушення зору,погане зор|розмите зору|vision problems|blurred vision,side_effects
+подвійне зор,бачу подвійно|diplopia|double vision,side_effects
+шум у вухах,дзвенить в вухах|тінітус|tinnitus,side_effects
+зниження слуху,погано чую|втрата слуху|hearing loss,side_effects
+біль у вухах,болять вуха|біль вуха|ear pain,indications
+біль при менструації,менструальний біль|дисменорея|болючі місячні|period pain,indications
+порушення менструального циклу,нерегулярні місячні|порушення циклу|irregular periods,indications
+виділення з піхви,виділення|вагінальні виділення|vaginal discharge,indications
+біль під час статевого акту,біль при сексі|диспареунія|painful intercourse,indications
+еректильна дисфункція,імпотенція|немає ерекції|erectile dysfunction,indications
+зниження лібідо,немає бажання|втрата лібідо|low libido,side_effects
+тремор,тремтіння|трясуться руки|tremor,side_effects
+судоми,конвульсії|напад|seizures|convulsions,side_effects
+оніміння,заніміла кінцівка|парестезія|numbness,side_effects
+поколювання,мурашки|покалювання|tingling,side_effects
+біль у зубах,зубний біль|болить зуб|toothache,indications
+кровоточивість ясен,кровоточать ясна|bleeding gums,indications
+закладеність носа,заложений ніс|не дихає ніс|nasal congestion,indications
+чхання,чхаю|sneezing,indications
+слізотеча,сльозяться очі|сльози|watery eyes,indications
+біль у очах,болять очі|eye pain,indications
+почервоніння очей,червоні очі|red eyes,indications
+депресія,пригнічений настрій|депресивний стан|depression,side_effects
+тривожність,тривога|занепокоєння|anxiety,side_effects
+дратівливість,роздратованість|irritability,side_effects
+агресивність,агресія|aggression,side_effects
+галюцинації,марення|бачу нереальне|hallucinations,side_effects
+сплутаність свідомості,плутанина|confusion,side_effects
+втрата свідомості,знепритомнів|втрата притомності|loss of consciousness,indications
+порушення координації,хитаюся|порушення рівноваги|loss of coordination,side_effects
+порушення мови,важко говорити|нечітка мова|speech problems,indications
+ковтання утруднене,важко ковтати|дисфагія|difficulty swallowing,indications
+зміна смаку,металевий присмак|порушення смаку|taste changes,side_effects
+втрата нюху,немає нюху|аносмія|loss of smell,indications
+гіпертонія,підвищений тиск|високий тиск|high blood pressure,side_effects
+гіпотонія,знижений тиск|низький тиск|low blood pressure,side_effects
+аритмія,порушення ритму серця|irregular heartbeat,side_effects
+ядуха,серцева ядуха|стенокардія|біль за грудиною при навантаженні|angina,indications
+печінка болить,біль у правому підребер'ї|біль печінки|liver pain,indications
+нирки болять,біль у попереку|біль нирок|kidney pain,indications
+болить підшлункова,біль в епігастрії|біль підшлункової залози|pancreatic pain,indications
+біль у желчному міхурі,холецистит|біль жовчного міхура|gallbladder pain,indications
+геморой,геморроїдальні вузли|hemorrhoids,indications
+тріщини анального отвору,тріщини ануса|anal fissures,indications
+варикоз,варикозне розширення вен|розширені вени|varicose veins,indications
+тромбоз,згустки крові|thrombosis,indications
+анемія,малокрів'я|низький гемоглобін|anemia,indications
+гіперглікемія,підвищений цукор|високий цукор крові|high blood sugar,indications
+гіпоглікемія,знижений цукор|низький цукор крові|low blood sugar,side_effects
+підвищений холестерин,високий холестерин|гіперхолестеринемія|high cholesterol,indications
+зниження імунітету,слабкий імунітет|часто хворію|weakened immunity,general
+алергічна реакція,алергія|allergy,side_effects
+анафілактичний шок,анафілаксія|важка алергічна реакція|anaphylaxis,side_effects
+задуха,астматичний напад|бронхоспазм|asthma attack,indications
+хропіння,хропу|snoring,general
+апное сну,зупинка дихання уві сні|sleep apnea,indications
+біль у молочних залозах,болять груди|масталгія|breast pain,indications
+виділення з сосків,виділення з грудей|nipple discharge,indications
+збільшення лімфовузлів,лімфовузли збільшені|опухлі лімфовузли|swollen lymph nodes,indications
+біль у лімфовузлах,болять лімфовузли|painful lymph nodes,indications
+втрата пам'яті,забудькуватість|провали пам'яті|memory loss,side_effects
+порушення концентрації,не можу зосередитись|розсіяність|concentration problems,side_effects
+нічна пітливість,пітні ночі|нічне потіння|night sweats,indications
+ранкова скутість,скованість по ранках|morning stiffness,indications
+посилене серцебиття при навантаженні,задишка при ходьбі|втома при навантаженні|exercise intolerance,indications
+біль у п'ятах,болять п'яти|heel pain,indications
+біль у шиї,болить шия|neck pain,indications
+біль у попереку,болить поперек|lumbago|lower back pain,indications
+біль у грудному відділі,болить між лопатками|thoracic pain,indications
+біль у стегнах,болять стегна|hip pain,indications
+біль у колінах,болять коліна|knee pain,indications
+біль у щиколотках,болять щиколотки|ankle pain,indications
+біль у зап'ястях,болять зап'ястя|wrist pain,indications
+біль у ліктях,болять лікті|elbow pain,indications
+біль у плечах,болять плечі|shoulder pain,indications
+біль у пальцях,болять пальці|finger pain,indications
+набряк ніг,опухлі ноги|набряки на ногах|leg swelling,indications
+набряк обличчя,опухле обличчя|facial swelling,indications
+синюшність губ,сині губи|ціаноз|cyanosis,indications
+холодні кінцівки,холодні руки і ноги|cold extremities,indications
+почервоніння шкіри,червона шкіра|покраснення|skin redness,side_effects
+лущення шкіри,лущиться шкіра|шелушение|skin peeling,side_effects
+сухість шкіри,суха шкіра|dry skin,side_effects
+жирна шкіра,підвищена жирність шкіри|oily skin,general
+акне,прищі|вугрі|acne,side_effects
+фурункули,чиряки|гнійники|boils,indications
+мозолі,натерті місця|calluses,general
+тріщини на шкірі,тріснута шкіра|skin cracks,indications
+виразки на шкірі,рани на шкірі|виразки|skin ulcers,indications
+пігментація шкіри,плями на шкірі|pigmentation,side_effects
+випадіння волосся,лисіння|алопеція|hair loss,side_effects
+ламкість нігтів,ламкі нігті|brittle nails,general
+зміна кольору нігтів,плями на нігтях|nail discoloration,general
+жовтизна білків очей,жовті очі|scleral icterus,indications

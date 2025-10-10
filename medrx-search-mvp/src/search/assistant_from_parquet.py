@@ -1,593 +1,588 @@
-# -*- coding: utf-8 -*-
+# src/search/assistant_from_parquet.py
 from __future__ import annotations
 
-import os
-import re
-import gc
-import json
-import math
-import time
 import argparse
-import unicodedata
+import dataclasses
 from dataclasses import dataclass, field
-from typing import List, Dict, Optional, Tuple, Any
+from typing import Any, Dict, List, Optional, Tuple
+import os
+import sys
+import json
+import time
+import math
+import re
+from datetime import datetime
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
 import pyarrow.parquet as pq
-from tqdm import tqdm
 
-from rank_bm25 import BM25Okapi
-from sentence_transformers import SentenceTransformer, CrossEncoder
-
-# -------- FAISS (optional) --------
+# --- optional / external deps (fail-soft) ---
 try:
     import faiss  # type: ignore
-    FAISS_OK = True
 except Exception:
-    FAISS_OK = False
+    faiss = None
 
-# -------- Query rewrite modules --------
 try:
-    from search.query_reform.normalizer import Normalizer
+    from sentence_transformers import SentenceTransformer
+except Exception:
+    SentenceTransformer = None  # type: ignore
+
+try:
+    from FlagEmbedding import FlagReranker  # BAAI/bge-reranker-v2-m3
+except Exception:
+    FlagReranker = None  # type: ignore
+
+try:
+    import yaml
+except Exception:
+    yaml = None
+
+# --- our modules (with safe fallbacks) ---
+try:
+    from search.query_reform.normalizer import normalize_query  # preferred
+except Exception:
+    # safe fallback
+    def normalize_query(q: str) -> str:
+        q = (q or "").strip()
+        # простенька нормалізація
+        q = q.replace("’", "'").replace("`", "'").replace("“", '"').replace("”", '"')
+        q = re.sub(r"\s+", " ", q)
+        return q.lower()
+
+try:
     from search.query_reform.alias_expander import AliasExpander
 except Exception:
-    class Normalizer:  # type: ignore
-        def normalize(self, s: str) -> str:
-            if not isinstance(s, str):
-                return ""
-            s = unicodedata.normalize("NFKC", s)
-            s = s.replace("\u00A0", " ")
-            s = s.replace("’", "'").replace("“", '"').replace("”", '"')
-            s = re.sub(r"\s+", " ", s).strip().lower()
-            return s
-
-    class AliasExpander:  # type: ignore
+    class AliasExpander:  # safe fallback
         def __init__(self, csv_path: Optional[str] = None):
-            self.map = {}
-            if csv_path and os.path.isfile(csv_path):
-                import csv
-                with open(csv_path, "r", encoding="utf-8") as f:
-                    rdr = csv.DictReader(f)
-                    for r in rdr:
-                        a = (r.get("alias") or "").strip().lower()
-                        t = (r.get("target") or "").strip().lower()
-                        if a and t:
-                            self.map.setdefault(a, set()).add(t)
-            for a, ts in list(self.map.items()):
-                for t in ts:
-                    self.map.setdefault(t, set()).add(a)
+            self.ok = bool(csv_path and os.path.exists(csv_path))
+            self._map = {}  # brand->inn, inn->brand
+            if self.ok:
+                try:
+                    # очікуємо 2 колонки: brand,inn (у твоєму файлі — саме так)
+                    df = pd.read_csv(csv_path)
+                    for _, r in df.iterrows():
+                        b = str(r.get("brand", "")).strip()
+                        i = str(r.get("inn", "")).strip()
+                        if b and i:
+                            self._map.setdefault(b.lower(), set()).add(i.lower())
+                            self._map.setdefault(i.lower(), set()).add(b.lower())
+                except Exception:
+                    self.ok = False
 
-        def expand(self, text: str, max_terms: int = 5) -> List[str]:
-            out = set()
-            toks = re.split(r"[^\w\u0400-\u04FF]+", text.lower())
-            for tok in toks:
-                tok = tok.strip()
-                if not tok:
-                    continue
-                out.add(tok)
-                if tok in self.map:
-                    out |= set(list(self.map[tok])[:max_terms])
-            return list(out)[:max_terms]
+        def expand(self, q: str, max_terms: int = 5) -> List[str]:
+            if not self.ok:
+                return []
+            toks = list(dict.fromkeys(re.findall(r"[^\W_]+", q.lower(), flags=re.UNICODE)))
+            alts: List[str] = []
+            for t in toks:
+                if t in self._map:
+                    alts.extend(list(self._map[t]))
+            alts = list(dict.fromkeys([a for a in alts if a not in toks]))
+            if not alts:
+                return []
+            # згенеруємо один-два варіанти (щоб не роздувати CE)
+            variant = q + " " + " ".join(alts[:max_terms])
+            return [variant]
 
-# -------- Clinical priors (optional) --------
-def load_priors(jsonl_path: Optional[str]) -> List[Dict[str, Any]]:
-    if not jsonl_path:
-        return []
-    if not os.path.isfile(jsonl_path):
-        print(f"[WARN] priors jsonl not found: {jsonl_path}")
-        return []
-    priors = []
-    with open(jsonl_path, "r", encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                priors.append(json.loads(line))
-            except Exception:
-                pass
-    return priors
+try:
+    from search.priors.clinical_priors import ClinicalPriors
+except Exception:
+    ClinicalPriors = None  # type: ignore
 
-def match_priors(query_norm: str, priors: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
-    if not priors:
-        return None
-    q = query_norm.lower()
-    for p in priors:
-        trig = p.get("triggers", []) or []
-        neg = p.get("neg_triggers", []) or []
-        if any(t.lower() in q for t in neg):
-            continue
-        if any(t.lower() in q for t in trig):
-            return p
+
+# ------------------- helpers -------------------
+def _now_ts() -> str:
+    return datetime.now().strftime("%Y%m%d_%H%M%S")
+
+
+def _json_default(o):
+    # безпечна серіалізація numpy / pathlib / ін.
+    if isinstance(o, (np.integer,)):
+        return int(o)
+    if isinstance(o, (np.floating,)):
+        return float(o)
+    if isinstance(o, (np.ndarray,)):
+        return o.tolist()
+    if isinstance(o, (Path,)):
+        return str(o)
+    return str(o)
+
+
+def _ensure_dir(p: Path) -> None:
+    p.mkdir(parents=True, exist_ok=True)
+
+
+def _first_existing_column(df: pd.DataFrame, candidates: List[str]) -> Optional[str]:
+    for c in candidates:
+        if c in df.columns:
+            return c
     return None
 
-# -------- intent-policy --------
-import yaml
 
-@dataclass
-class GateConfig:
-    mode: str = "prefer"  # 'none'|'prefer'|'require'
-    sections: List[str] = field(default_factory=lambda: ["Показання", "Спосіб застосування та дози"])
-
-@dataclass
-class IntentParams:
-    name: str = "indication"
-    doc_topN: int = 400
-    k: int = 300
-    gate: GateConfig = field(default_factory=GateConfig)
-
-def load_intent_policy(path: Optional[str]) -> Dict[str, IntentParams]:
-    defaults = IntentParams()
-    if not path or not os.path.isfile(path):
-        return {"_default": defaults}
-    with open(path, "r", encoding="utf-8") as f:
-        raw = yaml.safe_load(f) or {}
-    out: Dict[str, IntentParams] = {}
-    for intent, cfg in raw.items():
-        mode = (cfg.get("gate_mode") or defaults.gate.mode)
-        sections = cfg.get("gate_sections") or defaults.gate.sections
-        out[intent] = IntentParams(
-            name=intent,
-            doc_topN=int(cfg.get("doc_topN", defaults.doc_topN)),
-            k=int(cfg.get("k", defaults.k)),
-            gate=GateConfig(mode=mode, sections=list(sections)),
-        )
-    if "_default" not in out:
-        out["_default"] = defaults
+def _safe_to_list(x) -> List[int]:
+    out: List[int] = []
+    if isinstance(x, list):
+        for v in x:
+            if isinstance(v, (int, np.integer)):
+                out.append(int(v))
+            elif isinstance(v, str) and v.isdigit():
+                out.append(int(v))
     return out
 
-# -------- utils --------
-def _bm25_tokens(s: str) -> List[str]:
-    s = s.lower()
-    s = re.sub(r"[^\w\u0400-\u04FF]+", " ", s)
-    return s.split()
 
-# -------- Engine --------
+# ------------------- configs -------------------
+@dataclass
+class GateConfig:
+    mode: str = "prefer"
+    sections: List[str] = field(default_factory=lambda: ["Показання", "Спосіб застосування та дози"])
+    weight: float = 0.1  # якщо десь використовується для м'якого бусту
+
+
+@dataclass
+class IntentPolicy:
+    doc_topN: int = 400
+    k_final: int = 300
+    gate: GateConfig = field(default_factory=GateConfig)
+
+    @staticmethod
+    def from_yaml(path: Optional[str]) -> Dict[str, "IntentPolicy"]:
+        # дефолтна політика
+        default = {
+            "default": IntentPolicy(),
+            "indication": IntentPolicy(doc_topN=400, k_final=300, gate=GateConfig(mode="prefer")),
+            "dosage": IntentPolicy(doc_topN=300, k_final=200, gate=GateConfig(mode="prefer")),
+            "contra": IntentPolicy(doc_topN=400, k_final=300, gate=GateConfig(mode="prefer")),
+            "interactions": IntentPolicy(doc_topN=400, k_final=300, gate=GateConfig(mode="prefer")),
+            "side_effects": IntentPolicy(doc_topN=400, k_final=300, gate=GateConfig(mode="prefer")),
+            "unknown": IntentPolicy(doc_topN=400, k_final=300, gate=GateConfig(mode="prefer")),
+        }
+        if not path or not os.path.exists(path) or yaml is None:
+            return default
+        with open(path, "r", encoding="utf-8") as f:
+            raw = yaml.safe_load(f) or {}
+        out: Dict[str, IntentPolicy] = {}
+        for key, val in raw.items():
+            gate = val.get("gate", {})
+            out[key] = IntentPolicy(
+                doc_topN=int(val.get("doc_topN", default.get(key, default["default"]).doc_topN)),
+                k_final=int(val.get("k_final", default.get(key, default["default"]).k_final)),
+                gate=GateConfig(
+                    mode=str(gate.get("mode", default.get(key, default["default"]).gate.mode)),
+                    sections=list(gate.get("sections", default.get(key, default["default"]).gate.sections)),
+                    weight=float(gate.get("weight", default.get(key, default["default"]).gate.weight)),
+                ),
+            )
+        # гарантуємо наявність дефолтів
+        for k, v in default.items():
+            out.setdefault(k, v)
+        return out
+
+
+# ------------------- engine -------------------
+@dataclass
 class ParquetHybridEngine:
-    def __init__(
-        self,
-        index_dir: str,
-        embed_model: str,
-        doc_index_dir: Optional[str] = None,
-        ce_model: Optional[str] = None,
-        rrf_alpha: float = 60.0,
-        dump_dir: Optional[str] = None,
-        priors_jsonl: Optional[str] = None,
-    ):
-        self.index_dir = index_dir
-        self.embed_model_name = embed_model
-        self.doc_index_dir = doc_index_dir or index_dir
-        self.rrf_alpha = float(rrf_alpha)
-        self.dump_dir = dump_dir
-        if self.dump_dir:
-            os.makedirs(self.dump_dir, exist_ok=True)
+    index_dir: Path
+    doc_index_dir: Path
+    embed_model_name: str
+    ce_model_name: str
+    rrf_alpha: float = 60.0
+    use_rewrite: bool = False
+    aliases_csv: Optional[Path] = None
+    rewrite_max_terms: int = 5
+    intent_policy_map: Dict[str, IntentPolicy] = field(default_factory=dict)
+    dump_eval_dir: Optional[Path] = None
+    priors_jsonl: Optional[Path] = None
 
-        # load chunks metadata & BM25
-        chunks_parquet = os.path.join(index_dir, "chunks.parquet")
-        table = pq.read_table(
-            chunks_parquet,
-            columns=["doc_id", "section", "text"],
-        )
-        self.doc_ids = table.column("doc_id").to_numpy().astype(np.int64)
-        self.sections = table.column("section").to_pylist()
-        self.passages = table.column("text").to_pylist()
+    # runtime
+    encoder: Any = field(init=False, default=None)
+    faiss_index: Any = field(init=False, default=None)
+    doc_prefilter: Any = field(init=False, default=None)
+    chunks_df: Optional[pd.DataFrame] = field(init=False, default=None)
+    ce: Any = field(init=False, default=None)
+    expander: Optional[AliasExpander] = field(init=False, default=None)
+    priors: Optional[ClinicalPriors] = field(init=False, default=None)
 
-        tokenized = [_bm25_tokens(t) for t in self.passages]
-        self.bm25 = BM25Okapi(tokenized)
+    def __post_init__(self):
+        # load vectors / indices
+        if faiss is None:
+            raise RuntimeError("faiss is not available")
+        faiss_path = self.index_dir / "faiss.index"
+        if not faiss_path.exists():
+            raise FileNotFoundError(f"FAISS index not found: {faiss_path}")
+        self.faiss_index = faiss.read_index(str(faiss_path))
+        print(f"[INFO] FAISS loaded: faiss.index | dim={self.faiss_index.d}")
 
-        # FAISS chunk-level
-        self.faiss_index = None
-        self.vec_dim = 0
-        if FAISS_OK:
-            fa_path = os.path.join(index_dir, "faiss.index")
-            if os.path.isfile(fa_path):
-                self.faiss_index = faiss.read_index(fa_path)
-                self.vec_dim = self.faiss_index.d
-                print(f"[INFO] FAISS loaded: faiss.index | dim={self.vec_dim}")
-            else:
-                print("[WARN] FAISS chunk index not found; only BM25 will be used.")
-        else:
-            print("[WARN] FAISS is not available; only BM25 will be used.")
-
-        # Query encoder
+        # query encoder
+        if SentenceTransformer is None:
+            raise RuntimeError("sentence-transformers is required")
         self.encoder = SentenceTransformer(self.embed_model_name)
         print(f"[INFO] Query encoder ready: {self.embed_model_name}")
 
-        # Doc prefilter
-        self.doc_faiss = None
-        self.doc_id_map = None
-        if FAISS_OK:
-            doc_index_path = os.path.join(self.doc_index_dir, "doc.index")
-            doc_ids_path = os.path.join(self.doc_index_dir, "doc_ids.npy")
-            if os.path.isfile(doc_index_path) and os.path.isfile(doc_ids_path):
-                self.doc_faiss = faiss.read_index(doc_index_path)
-                self.doc_id_map = np.load(doc_ids_path)
-                print(f"[INFO] Doc prefilter ready: n={self.doc_id_map.shape[0]}, dim={self.doc_faiss.d}")
-            else:
-                print("[WARN] Doc prefilter files not found; skipping doc-level filtering.")
+        # doc prefilter (опційно)
+        doc_index_path = self.doc_index_dir / "doc.index"
+        if doc_index_path.exists():
+            try:
+                self.doc_prefilter = faiss.read_index(str(doc_index_path))
+                print(f"[INFO] Doc prefilter ready: n=?, dim={self.doc_prefilter.d}")
+            except Exception:
+                self.doc_prefilter = None
+        else:
+            print("[INFO] Doc prefilter not found (optional).")
 
-        # CrossEncoder
-        self.ce = None
-        if ce_model:
-            self.ce = CrossEncoder(ce_model, max_length=512)
-            print(f"[INFO] CrossEncoder active: {ce_model}")
+        # chunks parquet (щоб мати метадані / тексти, а також правильну колонку id)
+        chunks_parquet = self.index_dir / "chunks.parquet"
+        if not chunks_parquet.exists():
+            raise FileNotFoundError(f"Parquet not found: {chunks_parquet}")
+        table = pq.read_table(str(chunks_parquet), memory_map=True)
+        self.chunks_df = table.to_pandas()
+        # стандартизуємо id колонку
+        if "id" not in self.chunks_df.columns:
+            alt = _first_existing_column(self.chunks_df, ["chunk_id", "pid", "row_id"])
+            if alt:
+                self.chunks_df = self.chunks_df.rename(columns={alt: "id"})
+        if "id" not in self.chunks_df.columns:
+            # якщо зовсім немає - генеруємо
+            self.chunks_df["id"] = np.arange(len(self.chunks_df))
+        # уніфікуємо тип
+        self.chunks_df["id"] = self.chunks_df["id"].astype(int)
 
-        # Priors
-        self.priors = load_priors(priors_jsonl)
-        if self.priors:
-            print(f"[INFO] Clinical priors loaded: {len(self.priors)}")
+        # cross-encoder
+        if FlagReranker is None:
+            raise RuntimeError("FlagEmbedding (FlagReranker) is required for CE")
+        self.ce = FlagReranker(self.ce_model_name, use_fp16=True)
+        print(f"[INFO] CrossEncoder active: {self.ce_model_name}")
 
-    def _rrf(self, bm: List[int], fa: List[int], k: float) -> Dict[int, float]:
-        rank_bm = {pid: r + 1 for r, pid in enumerate(bm)}
-        rank_fa = {pid: r + 1 for r, pid in enumerate(fa)}
-        ids = set(rank_bm) | set(rank_fa)
-        out: Dict[int, float] = {}
-        for pid in ids:
-            s = 0.0
-            if pid in rank_bm: s += 1.0 / (k + rank_bm[pid])
-            if pid in rank_fa: s += 1.0 / (k + rank_fa[pid])
-            out[pid] = s
-        return out
-
-    def _apply_gate(self, pids: List[int], mode: str, sections: List[str]) -> List[int]:
-        if mode == "none":
-            return pids
-        want = set(s.strip() for s in sections if s.strip())
-        filtered = [pid for pid in pids if self.sections[pid] in want]
-        if mode == "require":
-            return filtered
-        return filtered if filtered else pids  # prefer
-
-    def _doc_prefilter(self, query: str, topN: int) -> Optional[set]:
-        if not self.doc_faiss:
-            return None
-        qv = self.encoder.encode([query], normalize_embeddings=True).astype("float32")
-        D, I = self.doc_faiss.search(qv, topN)
-        idxs = I[0].tolist()
-        idxs = [i for i in idxs if i >= 0]
-        if not idxs:
-            return None
-        return set(self.doc_id_map[idxs].tolist())
-
-    def _prior_boost_mask(self, pids: List[int], prior: Dict[str, Any]) -> np.ndarray:
-        if not prior:
-            return np.zeros(len(pids), dtype="float32")
-        boost = float(prior.get("boost", 0.05))
-        terms = set()
-        for t in prior.get("inn", []) + prior.get("brands_opt", []):
-            tt = (t or "").strip().lower()
-            if tt:
-                terms.add(tt)
-        if not terms:
-            return np.zeros(len(pids), dtype="float32")
-        mask = np.zeros(len(pids), dtype="float32")
-        for i, pid in enumerate(pids):
-            txt = (self.passages[pid] or "").lower()
-            if any(term in txt for term in terms):
-                mask[i] = boost
-        return mask
-
-    def search_once(
-        self,
-        query: str,
-        intent_params: IntentParams,
-        use_rewrite: bool = False,
-        normalizer: Optional[Normalizer] = None,
-        aliaser: Optional[AliasExpander] = None,
-        priors: Optional[List[Dict[str, Any]]] = None,
-        ce_top: int = 200,
-        ce_min: float = 0.15,
-        ce_weight: float = 0.75,
-        rrf_alpha: float = 60.0,
-        dump_path: Optional[str] = None,
-    ) -> Dict[str, Any]:
-        # rewrite
-        q_norm = normalizer.normalize(query) if (use_rewrite and normalizer) else query
-        expanded_terms: List[str] = []
-        if use_rewrite and aliaser:
-            expanded_terms = aliaser.expand(q_norm, max_terms=5)
+        # alias expander
+        if self.use_rewrite and self.aliases_csv and self.aliases_csv.exists():
+            self.expander = AliasExpander(str(self.aliases_csv))
+        else:
+            self.expander = None
 
         # priors
-        prior_hit = match_priors(q_norm, priors or [])
-
-        # base query with expansions
-        extra_terms = []
-        if expanded_terms:
-            extra_terms += expanded_terms
-        if prior_hit:
-            extra_terms += (prior_hit.get("inn", []) or []) + (prior_hit.get("brands_opt", []) or [])
-        query_for_search = q_norm if q_norm else query
-        if extra_terms:
-            query_for_search = query_for_search + " " + " ".join(sorted(set([t for t in extra_terms if t])))
-
-        # doc prefilter
-        doc_keep: Optional[set] = self._doc_prefilter(query_for_search, intent_params.doc_topN)
-
-        # BM25
-        bm_scores = self.bm25.get_scores(_bm25_tokens(query_for_search))
-        bm_idx = np.argsort(-bm_scores)
-        if doc_keep is not None:
-            bm_idx = [int(pid) for pid in bm_idx if self.doc_ids[int(pid)] in doc_keep]
+        if self.priors_jsonl and ClinicalPriors is not None and Path(self.priors_jsonl).exists():
+            self.priors = ClinicalPriors(str(self.priors_jsonl), allow_intents=("indication", "unknown"))
+            print(f"[INFO] Clinical priors loaded: {len(self.priors.entries)}")
         else:
-            bm_idx = [int(pid) for pid in bm_idx]
-        bm_idx = list(bm_idx[:max(1, intent_params.k)])
+            self.priors = None
 
-        # FAISS
-        fa_idx: List[int] = []
-        if self.faiss_index is not None:
-            q_vec = self.encoder.encode([query_for_search], normalize_embeddings=True).astype("float32")
-            D, I = self.faiss_index.search(q_vec, max(1, intent_params.k))
-            fa_idx = [int(i) for i in I[0].tolist() if i >= 0]
-            if doc_keep is not None:
-                fa_idx = [pid for pid in fa_idx if self.doc_ids[pid] in doc_keep]
+    # ---- retrieval helpers ----
+    def _embed(self, texts: List[str]) -> np.ndarray:
+        return np.asarray(self.encoder.encode(texts, batch_size=32, convert_to_numpy=True, show_progress_bar=False))
 
-        # RRF
-        rrf = self._rrf(bm_idx, fa_idx, k=float(rrf_alpha))
-        base_ranked = sorted(rrf.items(), key=lambda x: -x[1])
-        pids = [int(pid) for pid, _ in base_ranked[:intent_params.k]]
-        base_scores = np.array([rrf[pid] for pid in pids], dtype="float32")
+    def _faiss_topk(self, q_vec: np.ndarray, k: int) -> Tuple[np.ndarray, np.ndarray]:
+        # q_vec: (1, dim)
+        D, I = self.faiss_index.search(q_vec, k)
+        return D[0], I[0]
 
-        # Section gate
-        gated_pids = self._apply_gate(pids, intent_params.gate.mode, intent_params.gate.sections)
-        if not gated_pids:
-            gated_pids = pids
-        gate_mask = np.array([1.0 if pid in gated_pids else 0.0 for pid in pids], dtype="float32")
+    def _fetch_chunks(self, ids: List[int]) -> pd.DataFrame:
+        if not ids:
+            return self.chunks_df.iloc[0:0].copy()
+        df = self.chunks_df
+        sub = df[df["id"].isin(ids)].copy()
+        return sub
 
-        # Prior bonus
-        prior_bonus = self._prior_boost_mask(pids, prior_hit)
+    def _apply_ce(self, query: str, cand_df: pd.DataFrame, top_k: int = 200) -> Tuple[pd.DataFrame, Dict[int, float]]:
+        if cand_df.empty:
+            return cand_df, {}
+        # готуємо пари
+        texts = cand_df.get("text")
+        if texts is None:
+            text_col = _first_existing_column(cand_df, ["text", "chunk_text", "body"])
+            if text_col is None:
+                # нічого не можемо зробити
+                return cand_df, {}
+            texts = cand_df[text_col]
 
-        # CrossEncoder
-        ce_scores = None
-        fused = base_scores.copy()
-        if self.ce is not None and ce_top > 0:
-            topN = min(ce_top, len(pids))
-            pairs = [(query_for_search, self.passages[p]) for p in pids[:topN]]
+        pairs = [[query, t] for t in texts.tolist()]
+        scores = self.ce.compute_score(pairs, normalize=True)  # already in [0,1]
+        cand_df = cand_df.copy()
+        cand_df["ce_norm"] = scores
+        # відсортуємо по ce
+        cand_df = cand_df.sort_values("ce_norm", ascending=False)
+        # повернемо до top_k
+        cand_df = cand_df.head(min(len(cand_df), top_k)).reset_index(drop=True)
+        ce_map = {int(row["id"]): float(row["ce_norm"]) for _, row in cand_df.iterrows()}
+        return cand_df, ce_map
+
+    # ---- main search once ----
+    def search_once(
+        self,
+        q_raw: str,
+        intent: str,
+        policy: IntentPolicy,
+        rrf_alpha: float,
+        rewrite_max_terms: int = 5,
+        dump_dir: Optional[Path] = None,
+        q_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        t0 = time.time()
+        trace: Dict[str, Any] = {"q_raw": q_raw, "intent": intent}
+        # 1) normalize
+        q_norm = normalize_query(q_raw)
+        trace["q_norm"] = q_norm
+
+        # 2) rewrite (aliases)
+        q_variants: List[str] = [q_norm]
+        if self.use_rewrite and self.expander is not None:
             try:
-                raw = self.ce.predict(pairs)
-                if isinstance(raw, list):
-                    raw = np.array(raw, dtype="float32")
-                else:
-                    raw = raw.astype("float32")  # type: ignore
+                expansions = self.expander.expand(q_norm, max_terms=rewrite_max_terms) or []
+                if expansions:
+                    q_variants = [q_norm] + expansions
             except Exception:
-                raw = np.zeros(topN, dtype="float32")
-            raw_adj = np.maximum(0.0, raw - float(ce_min))
-            if raw_adj.size > 0:
-                rmin, rmax = float(raw_adj.min()), float(raw_adj.max())
-                ce_norm = (raw_adj - rmin) / (rmax - rmin + 1e-9)
-            else:
-                ce_norm = np.zeros_like(raw_adj)
-            ce_scores = np.zeros(len(pids), dtype="float32")
-            ce_scores[:topN] = ce_norm
-            fused = (1.0 - float(ce_weight)) * fused + float(ce_weight) * ce_scores
+                pass
+        trace["q_variants"] = q_variants
 
-        # Gate prefer masking
-        if intent_params.gate.mode == "prefer":
-            fused = fused * np.maximum(0.8, gate_mask)
-        # Prior bonus add
-        fused = fused + prior_bonus
-
-        # Final sort
-        order = np.argsort(-fused)
-        final_pids = [pids[i] for i in order]
-        final_scores = fused[order]
-
-        # ---- logging dump (STRICT Python ints) ----
-        dump: Dict[str, Any] = {
-            "query": query,
-            "query_norm": q_norm,
-            "query_expanded_terms": expanded_terms,
-            "prior_hit": prior_hit,
-            "intent_params": {
-                "intent": intent_params.name,
-                "doc_topN": int(intent_params.doc_topN),
-                "k": int(intent_params.k),
-                "gate_mode": intent_params.gate.mode,
-                "gate_sections": list(intent_params.gate.sections),
-                "rrf_alpha": float(rrf_alpha),
-            },
-            "bm25_top": [int(x) for x in bm_idx[:50]],
-            "faiss_top": [int(x) for x in fa_idx[:50]],
-            "rrf_top": [int(x) for x in pids[:50]],
-            "gate_mode_used": intent_params.gate.mode,
-            "gate_sections_used": list(intent_params.gate.sections),
-            "final_topk": [],
+        # 3) clinical priors (дозволяємо для indication та unknown)
+        prior_hit = None
+        prior_terms: List[str] = []
+        if self.priors is not None and intent in ("indication", "unknown"):
+            try:
+                prior_hit = self.priors.match(q_norm, intent)
+                if prior_hit:
+                    prior_terms = list(dict.fromkeys(prior_hit.get("terms", [])))[:3]
+                    if prior_terms:
+                        # терми додаємо в перший BM25-варіант (тут це перший текстовий варіант запиту)
+                        q_variants[0] = (q_variants[0] + " " + " ".join(prior_terms)).strip()
+            except Exception:
+                prior_hit = None
+                prior_terms = []
+        trace["priors"] = {
+            "enabled": self.priors is not None,
+            "matched_prior": bool(prior_hit),
+            "prior_terms": prior_terms,
+            "prior_id": prior_hit.get("matched_id") if prior_hit else None,
+            "matched_trigger": prior_hit.get("matched_trigger") if prior_hit else None,
         }
-        if ce_scores is not None:
-            dump["ce_top"] = int(min(ce_top, len(pids)))
-            dump["ce_scores"] = [float(v) for v in ce_scores[:int(min(ce_top, len(pids)))].tolist()]
 
-        for i in range(min(intent_params.k, len(final_pids))):
-            pid = int(final_pids[i])
-            dump["final_topk"].append({
-                "rank": int(i + 1),
-                "pid": pid,
-                "doc_id": int(self.doc_ids[pid]),
-                "section": self.sections[pid],
-                "score": float(final_scores[i]),
-                "text": self.passages[pid][:512],
-            })
+        # 4) dense retrieval (через FAISS) по першому варіанту (як основному)
+        q_for_dense = q_variants[0] if q_variants else q_norm
+        q_vec = self._embed([q_for_dense])
+        # беремо doc_topN як верхню межу кандидатів
+        doc_topN = int(policy.doc_topN)
+        D, I = self._faiss_topk(q_vec, k=doc_topN)
+        cand_ids = [int(i) for i in I.tolist() if i >= 0]
+        trace["faiss"] = {"topN": doc_topN, "cand_count": len(cand_ids)}
 
-        if dump_path:
-            with open(dump_path, "w", encoding="utf-8") as f:
-                json.dump(dump, f, ensure_ascii=False, indent=2)
+        # 5) забираємо кандидати
+        cand_df = self._fetch_chunks(cand_ids)
 
-        return dump
+        # 6) CE rerank (без додаткових ваг — використовуємо нормовані ce_norm)
+        ce_top = min(200, policy.k_final)
+        cand_df, ce_map = self._apply_ce(q_for_dense, cand_df, top_k=ce_top)
+        trace["ce"] = {"used": True, "top": ce_top, "scored": len(cand_df)}
 
-# -------- intent detect (rule-based, простий) --------
-def guess_intent(q: str) -> str:
-    s = q.lower()
-    if any(w in s for w in ["доза", "скільки приймати", "як приймати"]):
-        return "dosage"
-    if any(w in s for w in ["протипоказан", "кому не можна", "заборонено"]):
-        return "contra"
-    if any(w in s for w in ["побічн", "побочка", "побочки", "небажан"]):
-        return "side_effects"
-    if any(w in s for w in ["взаємод", "несумісн", "разом з"]):
-        return "interactions"
-    return "indication"
+        # 7) фінальний зріз k_final
+        final_k = min(policy.k_final, len(cand_df))
+        final_df = cand_df.head(final_k).reset_index(drop=True)
+        results = [{"id": int(r["id"]), "score": float(r.get("ce_norm", 0.0))} for _, r in final_df.iterrows()]
 
-# -------- EVAL --------
+        elapsed = time.time() - t0
+
+        out = {
+            "query": q_raw,
+            "intent": intent,
+            "q_norm": q_norm,
+            "q_effective": q_for_dense,
+            "k": int(policy.k_final),
+            "doc_topN": int(policy.doc_topN),
+            "results": results,
+            "elapsed_sec": elapsed,
+            "trace": trace,
+        }
+
+        # 8) dump у runs (один файл на запит)
+        if dump_dir:
+            _ensure_dir(dump_dir)
+            fname = f"{q_id or 'q'}{'' if q_id and q_id.startswith('q') else ''}.json"
+            # якщо q_id вигляду "q0007" — файлик буде "q0007.json"
+            out_path = dump_dir / (f"{q_id}.json" if q_id else f"q.json")
+            with open(out_path, "w", encoding="utf-8") as f:
+                json.dump(out, f, ensure_ascii=False, indent=2, default=_json_default)
+
+        return out
+
+
+# ------------------- metrics & eval -------------------
+def precision_at_k(pred_ids: List[int], gold_ids: List[int], k: int) -> float:
+    if k <= 0:
+        return 0.0
+    pred = pred_ids[:k]
+    if not pred:
+        return 0.0
+    inter = len(set(pred) & set(gold_ids))
+    return inter / float(k)
+
+
+def recall_at_k(pred_ids: List[int], gold_ids: List[int], k: int) -> float:
+    if not gold_ids:
+        return 0.0
+    pred = pred_ids[:k]
+    inter = len(set(pred) & set(gold_ids))
+    return inter / float(len(gold_ids))
+
+
+def ndcg_at_k(pred_ids: List[int], gold_ids: List[int], k: int) -> float:
+    if not gold_ids:
+        return 0.0
+    pred = pred_ids[:k]
+    dcg = 0.0
+    for i, pid in enumerate(pred, start=1):
+        if pid in gold_ids:
+            dcg += 1.0 / math.log2(i + 1)
+    # ideal
+    ideal_hits = min(len(gold_ids), k)
+    idcg = sum(1.0 / math.log2(i + 1) for i in range(1, ideal_hits + 1))
+    return dcg / idcg if idcg > 0 else 0.0
+
+
 def evaluate(
     engine: ParquetHybridEngine,
-    queries_path: str,
-    intent_policy: Dict[str, IntentParams],
-    use_rewrite: bool,
-    normalizer: Optional[Normalizer],
-    aliaser: Optional[AliasExpander],
-    ce_top: int,
-    ce_min: float,
-    ce_weight: float,
+    queries_path: Path,
+    policy_map: Dict[str, IntentPolicy],
     rrf_alpha: float,
-    dump_dir: Optional[str] = None,
-) -> Dict[str, float]:
-    rows = []
+    dump_eval_dir: Optional[Path] = None,
+    subset_tag: str = "full",
+) -> Dict[str, Any]:
+    # читаємо JSONL
+    data: List[Dict[str, Any]] = []
     with open(queries_path, "r", encoding="utf-8") as f:
         for line in f:
-            line = line.strip()
-            if not line:
+            if not line.strip():
                 continue
-            rows.append(json.loads(line))
-    print(f"[INFO] Loaded queries: {len(rows)}")
+            data.append(json.loads(line))
 
-    prec_hits = 0.0
-    recall_hits = 0.0
-    ndcg_sum = 0.0
-    total_q = 0
+    print(f"[INFO] Loaded queries: {len(data)}")
 
-    run_dir = None
-    if dump_dir:
-        stamp = time.strftime("%Y%m%d_%H%M%S")
-        run_dir = os.path.join(dump_dir, f"run_{stamp}")
-        os.makedirs(run_dir, exist_ok=True)
+    # каталоги логів
+    run_dir: Optional[Path] = None
+    if dump_eval_dir:
+        run_dir = dump_eval_dir / f"run_{_now_ts()}"
+        _ensure_dir(run_dir)
 
-    for qi, item in enumerate(tqdm(rows, desc="Eval", unit="q")):
+    # прогін
+    all_prec10: List[float] = []
+    all_recall300: List[float] = []
+    all_ndcg300: List[float] = []
+
+    for idx, item in enumerate(data):
         q = item.get("query", "")
-        gold_ids = item.get("gold_doc_ids", []) or item.get("gold_drugs", [])
-        gold_ids = [int(x) for x in gold_ids] if gold_ids else []
+        intent = item.get("intent", "unknown")
+        gold_ids = _safe_to_list(item.get("gold_doc_ids", []))
 
-        intent = item.get("intent") or guess_intent(q)
-        ip = intent_policy.get(intent) or intent_policy["_default"]
+        policy = policy_map.get(intent, policy_map.get("default", IntentPolicy()))
+        qid = f"q{idx:04d}"
 
-        dump_path = os.path.join(run_dir, f"q{qi:04d}.json") if run_dir else None
-        res = engine.search_once(
-            q,
-            ip,
-            use_rewrite=use_rewrite,
-            normalizer=normalizer,
-            aliaser=aliaser,
-            priors=engine.priors,
-            ce_top=ce_top,
-            ce_min=ce_min,
-            ce_weight=ce_weight,
+        out = engine.search_once(
+            q_raw=q,
+            intent=intent,
+            policy=policy,
             rrf_alpha=rrf_alpha,
-            dump_path=dump_path,
+            rewrite_max_terms=engine.rewrite_max_terms,
+            dump_dir=run_dir,
+            q_id=qid,
         )
 
-        top_docs = [int(r["doc_id"]) for r in res["final_topk"]]
-        k = len(top_docs)
-        rels = set(gold_ids)
-        hits = [1 if d in rels else 0 for d in top_docs]
+        preds = [int(r["id"]) for r in out.get("results", [])]
 
-        p_at_k = sum(hits) / max(1, k)
-        r_at_k = (len(rels.intersection(set(top_docs))) / max(1, len(rels))) if rels else 0.0
+        p10 = precision_at_k(preds, gold_ids, 10)
+        r300 = recall_at_k(preds, gold_ids, 300)
+        n300 = ndcg_at_k(preds, gold_ids, 300)
 
-        dcg = 0.0
-        for rank, h in enumerate(hits, start=1):
-            if h:
-                dcg += 1.0 / math.log2(rank + 1.0)
-        ideal = 0.0
-        if rels:
-            ideal_count = min(len(rels), k)
-            for rank in range(1, ideal_count + 1):
-                ideal += 1.0 / math.log2(rank + 1.0)
-        ndcg = (dcg / ideal) if ideal > 0 else 0.0
+        all_prec10.append(p10)
+        all_recall300.append(r300)
+        all_ndcg300.append(n300)
 
-        prec_hits += p_at_k
-        recall_hits += r_at_k
-        ndcg_sum += ndcg
-        total_q += 1
+    # агрегат
+    P10 = float(np.mean(all_prec10)) if all_prec10 else 0.0
+    R300 = float(np.mean(all_recall300)) if all_recall300 else 0.0
+    NDCG300 = float(np.mean(all_ndcg300)) if all_ndcg300 else 0.0
 
-    metrics = {
-        "Precision@k": float(prec_hits / max(1, total_q)),
-        "Recall@k": float(recall_hits / max(1, total_q)),
-        "nDCG@k": float(ndcg_sum / max(1, total_q)),
-        "queries": int(total_q),
-    }
+    print("\n=== METRICS ===")
+    print(f"Precision@10: {P10:.4f}")
+    print(f"Recall@300: {R300:.4f}")
+    print(f"nDCG@300: {NDCG300:.4f}")
+    print(f"N: {len(data)}")
+    print(f"subset: {subset_tag}")
+
     if run_dir:
-        with open(os.path.join(run_dir, "summary.json"), "w", encoding="utf-8") as f:
-            json.dump(metrics, f, ensure_ascii=False, indent=2)
-    return metrics
+        with open(run_dir / "metrics.json", "w", encoding="utf-8") as f:
+            json.dump(
+                {
+                    "subset": subset_tag,
+                    "N": len(data),
+                    "Precision@10": P10,
+                    "Recall@300": R300,
+                    "nDCG@300": NDCG300,
+                },
+                f,
+                ensure_ascii=False,
+                indent=2,
+                default=_json_default,
+            )
 
-# -------- CLI --------
-def parse_args() -> argparse.Namespace:
+    return {"P10": P10, "R300": R300, "NDCG300": NDCG300, "N": len(data), "subset": subset_tag}
+
+
+# ------------------- cli -------------------
+def build_argparser() -> argparse.Namespace:
     p = argparse.ArgumentParser(
-        description="Assistant from Parquet — hybrid BM25 + FAISS + RRF + CE (+ rewrite + priors) eval"
+        "Assistant from Parquet — hybrid FAISS + CE (+ rewrite + priors) eval",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
-    p.add_argument("--index_dir", required=True)
-    p.add_argument("--doc_index_dir", default=None)
-    p.add_argument("--embed_model", default="intfloat/multilingual-e5-base")
-    p.add_argument("--ce_model", default="BAAI/bge-reranker-v2-m3")
-    p.add_argument("--queries", required=True)
-    p.add_argument("--aliases", default=None)
+    p.add_argument("--index_dir", required=True, type=Path)
+    p.add_argument("--doc_index_dir", required=True, type=Path)
+    p.add_argument("--embed_model", default="intfloat/multilingual-e5-base", type=str)
+    p.add_argument("--ce_model", default="BAAI/bge-reranker-v2-m3", type=str)
+    p.add_argument("--queries", required=True, type=Path)
+
+    p.add_argument("--intent_policy", type=Path, default=None)
     p.add_argument("--rrf_alpha", type=float, default=60.0)
 
     # rewrite
     p.add_argument("--use_rewrite", action="store_true")
-    p.add_argument("--rewrite_aliases_csv", default=None)
+    p.add_argument("--rewrite_aliases_csv", type=Path, default=None)
     p.add_argument("--rewrite_max_terms", type=int, default=5)
 
-    # intent policy
-    p.add_argument("--intent_policy", default=None)
-
     # priors
-    p.add_argument("--priors_jsonl", default=None)
+    p.add_argument("--priors_jsonl", type=Path, default=None)
 
-    # CE params
-    p.add_argument("--ce_top", type=int, default=200)
-    p.add_argument("--ce_min", type=float, default=0.15)
-    p.add_argument("--ce_weight", type=float, default=0.75)
-
-    # dump
-    p.add_argument("--dump_eval_dir", default=None)
+    # dumps
+    p.add_argument("--dump_eval_dir", type=Path, default=None)
 
     return p.parse_args()
 
-def main():
-    args = parse_args()
 
-    policy = load_intent_policy(args.intent_policy)
-    normalizer = Normalizer() if args.use_rewrite else None
-    aliaser = AliasExpander(args.rewrite_aliases_csv) if args.use_rewrite else None
+def main():
+    args = build_argparser()
+
+    policy_map = IntentPolicy.from_yaml(str(args.intent_policy) if args.intent_policy else None)
 
     engine = ParquetHybridEngine(
         index_dir=args.index_dir,
-        embed_model=args.embed_model,
         doc_index_dir=args.doc_index_dir,
-        ce_model=args.ce_model,
+        embed_model_name=args.embed_model,
+        ce_model_name=args.ce_model,
         rrf_alpha=args.rrf_alpha,
-        dump_dir=args.dump_eval_dir,
+        use_rewrite=bool(args.use_rewrite),
+        aliases_csv=args.rewrite_aliases_csv,
+        rewrite_max_terms=int(args.rewrite_max_terms),
+        intent_policy_map=policy_map,
+        dump_eval_dir=args.dump_eval_dir,
         priors_jsonl=args.priors_jsonl,
     )
 
+    subset = "full"
     metrics = evaluate(
         engine=engine,
         queries_path=args.queries,
-        intent_policy=policy,
-        use_rewrite=args.use_rewrite,
-        normalizer=normalizer,
-        aliaser=aliaser,
-        ce_top=args.ce_top,
-        ce_min=args.ce_min,
-        ce_weight=args.ce_weight,
+        policy_map=policy_map,
         rrf_alpha=args.rrf_alpha,
-        dump_dir=args.dump_eval_dir,
+        dump_eval_dir=args.dump_eval_dir,
+        subset_tag=subset,
     )
 
-    print("\n=== EVAL @k ===")
-    print(f"Precision@k: {metrics['Precision@k']:.4f}")
-    print(f"Recall@k:    {metrics['Recall@k']:.4f}")
-    print(f"nDCG@k:      {metrics['nDCG@k']:.4f}")
 
 if __name__ == "__main__":
     main()

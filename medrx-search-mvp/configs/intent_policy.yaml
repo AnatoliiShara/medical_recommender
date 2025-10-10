@@ -1,0 +1,55 @@
+# Профілі параметрів під тип наміру (intent)
+# Значення тут — "пер-кверійний" оверрайд дефолтів CLI.
+default:
+  doc_topN: 400
+  k: 300
+  gate_mode: prefer
+  gate_sections:
+    - "Показання"
+    - "Спосіб застосування та дози"
+    - "Протипоказання"
+    - "Побічні реакції"
+  ce_top: 150
+  ce_weight: 0.70
+
+indication:
+  doc_topN: 300
+  k: 200
+  gate_mode: prefer
+  gate_sections: ["Показання"]
+  ce_top: 120
+  ce_weight: 0.65
+
+dosage:
+  doc_topN: 300
+  k: 200
+  gate_mode: require
+  gate_sections: ["Спосіб застосування та дози"]
+  ce_top: 120
+  ce_weight: 0.60
+
+contraindication:
+  doc_topN: 450
+  k: 300
+  gate_mode: prefer
+  gate_sections:
+    - "Протипоказання"
+    - "Взаємодія з іншими лікарськими засобами та інші види взаємодій"
+  ce_top: 150
+  ce_weight: 0.70
+
+interactions:
+  doc_topN: 500
+  k: 300
+  gate_mode: require
+  gate_sections: ["Взаємодія з іншими лікарськими засобами та інші види взаємодій"]
+  ce_top: 150
+  ce_weight: 0.70
+
+side_effects:
+  doc_topN: 400
+  k: 250
+  gate_mode: prefer
+  gate_sections: ["Побічні реакції"]
+  ce_top: 120
+  ce_weight: 0.65

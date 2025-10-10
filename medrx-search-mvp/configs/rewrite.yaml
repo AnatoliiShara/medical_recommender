@@ -1,0 +1,14 @@
+enable: true
+aliases_csv: "../data/dicts/brand_inn_aliases.PATCHED2.csv"
+symptoms_csv: "../data/dicts/symptom_aliases_ua.csv"
+units_csv: "../data/dicts/unit_map.csv"
+
+add_inn_from_brand: true
+add_brand_from_inn: true
+max_brand_per_inn: 3
+max_alias_expansions: 8
+
+expand_symptoms: true
+max_symptom_exp: 4
+append_inn_for_brand_or_alias: true
+max_appended_inn: 5

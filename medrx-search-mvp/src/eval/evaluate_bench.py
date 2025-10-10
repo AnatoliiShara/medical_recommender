@@ -81,7 +81,9 @@ def main():
         overlap=200,
         show_batches=True,
     )
-    idx.enable_crossencoder(args.reranker_model, args.rerank_top, args.ce_min, args.ce_weight)
+    ## [PATCH] skip CE when none
+    if args.reranker_model and str(args.reranker_model).lower() not in {'none','off'} and args.rerank_top>0:
+        idx.enable_crossencoder(args.reranker_model, args.rerank_top, args.ce_min, args.ce_weight)
 
     qs = load_queries(args.queries)
     print(f"[INFO] Запитів у бенчі: {len(qs)}")

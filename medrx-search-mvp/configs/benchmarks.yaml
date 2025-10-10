@@ -1,0 +1,16 @@
+# configs/benchmarks.yaml
+runs_root: "data/eval/runs"
+
+benchmarks:
+  - name: "human-50"
+    queries:
+      - "data/eval/queries_medrx_ua.enhanced.jsonl"
+    k_eval: [10, 20]
+  - name: "full-240"
+    queries:
+      - "data/eval/queries_autogen_ua.enhanced.jsonl"
+    k_eval: [10, 20]
+
+# Нотатки:
+# - k_eval = які @k рахувати (Prec@k, nDCG@k, Recall@k).
+# - Safe@k / Violation@k теж по цих k, якщо у логах будуть поля для safety (додамо в A2).
