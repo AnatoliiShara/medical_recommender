@@ -1,55 +1,74 @@
-# Профілі параметрів під тип наміру (intent)
-# Значення тут — "пер-кверійний" оверрайд дефолтів CLI.
 default:
-  doc_topN: 400
-  k: 300
-  gate_mode: prefer
-  gate_sections:
-    - "Показання"
-    - "Спосіб застосування та дози"
-    - "Протипоказання"
-    - "Побічні реакції"
-  ce_top: 150
-  ce_weight: 0.70
-
-indication:
-  doc_topN: 300
-  k: 200
-  gate_mode: prefer
-  gate_sections: ["Показання"]
-  ce_top: 120
+  doc_topN: 800
+  k_final: 300
+  gate:
+    mode: prefer
+    sections:
+    - Показання
+    - Спосіб застосування та дози
+    - Протипоказання
+    - Побічні реакції
+    weight: 1.0
+  ce_top: 0
   ce_weight: 0.65
-
+indication:
+  doc_topN: 800
+  k_final: 300
+  gate:
+    mode: prefer
+    sections:
+    - Показання
+    weight: 1.0
+  ce_top: 0
+  ce_weight: 0.65
 dosage:
-  doc_topN: 300
-  k: 200
-  gate_mode: require
-  gate_sections: ["Спосіб застосування та дози"]
-  ce_top: 120
-  ce_weight: 0.60
-
+  doc_topN: 600
+  k_final: 200
+  gate:
+    mode: prefer
+    sections:
+    - Спосіб застосування та дози
+    weight: 1.0
+  ce_top: 0
+  ce_weight: 0.65
 contraindication:
-  doc_topN: 450
-  k: 300
-  gate_mode: prefer
-  gate_sections:
-    - "Протипоказання"
-    - "Взаємодія з іншими лікарськими засобами та інші види взаємодій"
-  ce_top: 150
-  ce_weight: 0.70
-
+  doc_topN: 800
+  k_final: 300
+  gate:
+    mode: require
+    sections:
+    - Протипоказання
+    weight: 1.0
+  ce_top: 0
+  ce_weight: 0.65
 interactions:
-  doc_topN: 500
-  k: 300
-  gate_mode: require
-  gate_sections: ["Взаємодія з іншими лікарськими засобами та інші види взаємодій"]
-  ce_top: 150
-  ce_weight: 0.70
-
+  doc_topN: 800
+  k_final: 300
+  gate:
+    mode: require
+    sections:
+    - Взаємодія з іншими лікарськими засобами та інші види взаємодій
+    weight: 1.0
+  ce_top: 0
+  ce_weight: 0.65
 side_effects:
-  doc_topN: 400
-  k: 250
-  gate_mode: prefer
-  gate_sections: ["Побічні реакції"]
-  ce_top: 120
+  doc_topN: 600
+  k_final: 250
+  gate:
+    mode: prefer
+    sections:
+    - Побічні реакції
+    weight: 1.0
+  ce_top: 0
+  ce_weight: 0.65
+unknown:
+  doc_topN: 800
+  k_final: 300
+  gate:
+    mode: prefer
+    sections:
+    - Показання
+    - Спосіб застосування та дози
+    weight: 1.0
+  ce_top: 0
   ce_weight: 0.65

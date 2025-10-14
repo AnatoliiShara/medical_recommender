@@ -1,63 +1,41 @@
-# Python
+# venv / IDE
+venv/
+.pytype/
+.mypy_cache/
 __pycache__/
 *.pyc
-venv/
-.env
-.cache/
+.ipynb_checkpoints/
+.DS_Store
 
-# Artifacts / runs
-data/processed/**
-data/eval/runs/**
-
-# Heavy formats (про всяк випадок)
-*.parquet
-*.index
-*.npy
-cat > .gitignore << 'EOF'
-# Python
-__pycache__/
-*.py[cod]
-*$py.class
-*.so
-.Python
-venv/
-env/
-*.egg-info/
-
-# IDE
-.vscode/
-.idea/
-*.swp
-
-# MODELS (ДУЖЕ ВЕЛИКІ - НЕ ДЛЯ GIT!)
-models/
-*.safetensors
-*.bin
-*.onnx
-*.pt
-*.pth
-
-# Artifacts and training outputs
+# дані/артефакти/моделі (великі)
+data/raw/
+data/processed/
 artifacts_backup/
 runs/
 checkpoints/
-*.log
-stdout.log
-
-# Large data files
-data/interim/
+models/
+notebooks/
 *.parquet
+*.faiss
+faiss.index
+*.npy
+*.npz
+*.pt
+*.bin
+*.onnx
 *.pkl
-*.pickle
+*.log
+*.gz
+*.xz
+*.zip
+*.tar
+*.7z
 
-# Evaluation runs
-data/eval/runs_*/
-data/eval/baselines/*/
+# дозволяємо дрібні словники/скрипти/евал-списки
+!data/dicts/**
+!data/eval/*.jsonl
+!data/eval/*.csv
 
-# Temp files
-*.tmp
-*.bak
-.DS_Store
-EOF
-
-git add .gitignore
+# docker / tf / misc
+docker/.env
+*.tfstate

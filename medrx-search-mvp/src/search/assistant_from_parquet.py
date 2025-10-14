@@ -1,588 +1,522 @@
-# src/search/assistant_from_parquet.py
+# -*- coding: utf-8 -*-
 from __future__ import annotations
 
 import argparse
-import dataclasses
-from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Tuple
-import os
-import sys
 import json
-import time
-import math
-import re
-from datetime import datetime
+import os
 from pathlib import Path
+from datetime import datetime
+from typing import Any, Dict, Iterable, List, Tuple
 
+import faiss
 import numpy as np
 import pandas as pd
 import pyarrow.parquet as pq
+from tqdm import tqdm
+from rank_bm25 import BM25Okapi
+from sentence_transformers import SentenceTransformer
 
-# --- optional / external deps (fail-soft) ---
-try:
-    import faiss  # type: ignore
-except Exception:
-    faiss = None
+# ------------------- utils -------------------
 
-try:
-    from sentence_transformers import SentenceTransformer
-except Exception:
-    SentenceTransformer = None  # type: ignore
-
-try:
-    from FlagEmbedding import FlagReranker  # BAAI/bge-reranker-v2-m3
-except Exception:
-    FlagReranker = None  # type: ignore
-
-try:
-    import yaml
-except Exception:
-    yaml = None
-
-# --- our modules (with safe fallbacks) ---
-try:
-    from search.query_reform.normalizer import normalize_query  # preferred
-except Exception:
-    # safe fallback
-    def normalize_query(q: str) -> str:
-        q = (q or "").strip()
-        # простенька нормалізація
-        q = q.replace("’", "'").replace("`", "'").replace("“", '"').replace("”", '"')
-        q = re.sub(r"\s+", " ", q)
-        return q.lower()
-
-try:
-    from search.query_reform.alias_expander import AliasExpander
-except Exception:
-    class AliasExpander:  # safe fallback
-        def __init__(self, csv_path: Optional[str] = None):
-            self.ok = bool(csv_path and os.path.exists(csv_path))
-            self._map = {}  # brand->inn, inn->brand
-            if self.ok:
-                try:
-                    # очікуємо 2 колонки: brand,inn (у твоєму файлі — саме так)
-                    df = pd.read_csv(csv_path)
-                    for _, r in df.iterrows():
-                        b = str(r.get("brand", "")).strip()
-                        i = str(r.get("inn", "")).strip()
-                        if b and i:
-                            self._map.setdefault(b.lower(), set()).add(i.lower())
-                            self._map.setdefault(i.lower(), set()).add(b.lower())
-                except Exception:
-                    self.ok = False
-
-        def expand(self, q: str, max_terms: int = 5) -> List[str]:
-            if not self.ok:
-                return []
-            toks = list(dict.fromkeys(re.findall(r"[^\W_]+", q.lower(), flags=re.UNICODE)))
-            alts: List[str] = []
-            for t in toks:
-                if t in self._map:
-                    alts.extend(list(self._map[t]))
-            alts = list(dict.fromkeys([a for a in alts if a not in toks]))
-            if not alts:
-                return []
-            # згенеруємо один-два варіанти (щоб не роздувати CE)
-            variant = q + " " + " ".join(alts[:max_terms])
-            return [variant]
-
-try:
-    from search.priors.clinical_priors import ClinicalPriors
-except Exception:
-    ClinicalPriors = None  # type: ignore
-
-
-# ------------------- helpers -------------------
-def _now_ts() -> str:
+def ts_now() -> str:
     return datetime.now().strftime("%Y%m%d_%H%M%S")
 
-
-def _json_default(o):
-    # безпечна серіалізація numpy / pathlib / ін.
-    if isinstance(o, (np.integer,)):
-        return int(o)
-    if isinstance(o, (np.floating,)):
-        return float(o)
-    if isinstance(o, (np.ndarray,)):
-        return o.tolist()
-    if isinstance(o, (Path,)):
-        return str(o)
-    return str(o)
-
-
-def _ensure_dir(p: Path) -> None:
+def ensure_dir(p: Path) -> Path:
     p.mkdir(parents=True, exist_ok=True)
+    return p
 
+def iter_jsonl(path: Path) -> Iterable[Dict[str, Any]]:
+    with open(path, encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            yield json.loads(line)
 
-def _first_existing_column(df: pd.DataFrame, candidates: List[str]) -> Optional[str]:
-    for c in candidates:
-        if c in df.columns:
-            return c
-    return None
+def _safe_to_list(x) -> List[Any]:
+    if x is None:
+        return []
+    if isinstance(x, (list, tuple, set)):
+        return list(x)
+    return [x]
 
-
-def _safe_to_list(x) -> List[int]:
-    out: List[int] = []
-    if isinstance(x, list):
-        for v in x:
-            if isinstance(v, (int, np.integer)):
-                out.append(int(v))
-            elif isinstance(v, str) and v.isdigit():
-                out.append(int(v))
+def _safe_to_int_list(x) -> List[int]:
+    out = []
+    for t in _safe_to_list(x):
+        if isinstance(t, int):
+            out.append(t)
+        elif isinstance(t, str) and t.isdigit():
+            out.append(int(t))
     return out
 
+def load_gold_ids(item: Dict[str, Any]) -> List[int]:
+    # підтримаємо кілька можливих ключів
+    CAND_KEYS = ["gold_doc_ids", "gold_ids", "gold_id", "golds", "doc_gold_ids", "doc_ids"]
+    for k in CAND_KEYS:
+        if k in item:
+            g = _safe_to_int_list(item.get(k))
+            if g:
+                return g
+    return []
 
-# ------------------- configs -------------------
-@dataclass
-class GateConfig:
-    mode: str = "prefer"
-    sections: List[str] = field(default_factory=lambda: ["Показання", "Спосіб застосування та дози"])
-    weight: float = 0.1  # якщо десь використовується для м'якого бусту
+def pick_query_text(item: Dict[str, Any]) -> str:
+    for k in ("query", "q", "text", "question"):
+        if k in item and isinstance(item[k], str):
+            return item[k]
+    # fallback — дамп усякого, але краще, щоби був "query"
+    return str(item)
 
+# ------------------- metrics -------------------
 
-@dataclass
-class IntentPolicy:
-    doc_topN: int = 400
-    k_final: int = 300
-    gate: GateConfig = field(default_factory=GateConfig)
-
-    @staticmethod
-    def from_yaml(path: Optional[str]) -> Dict[str, "IntentPolicy"]:
-        # дефолтна політика
-        default = {
-            "default": IntentPolicy(),
-            "indication": IntentPolicy(doc_topN=400, k_final=300, gate=GateConfig(mode="prefer")),
-            "dosage": IntentPolicy(doc_topN=300, k_final=200, gate=GateConfig(mode="prefer")),
-            "contra": IntentPolicy(doc_topN=400, k_final=300, gate=GateConfig(mode="prefer")),
-            "interactions": IntentPolicy(doc_topN=400, k_final=300, gate=GateConfig(mode="prefer")),
-            "side_effects": IntentPolicy(doc_topN=400, k_final=300, gate=GateConfig(mode="prefer")),
-            "unknown": IntentPolicy(doc_topN=400, k_final=300, gate=GateConfig(mode="prefer")),
-        }
-        if not path or not os.path.exists(path) or yaml is None:
-            return default
-        with open(path, "r", encoding="utf-8") as f:
-            raw = yaml.safe_load(f) or {}
-        out: Dict[str, IntentPolicy] = {}
-        for key, val in raw.items():
-            gate = val.get("gate", {})
-            out[key] = IntentPolicy(
-                doc_topN=int(val.get("doc_topN", default.get(key, default["default"]).doc_topN)),
-                k_final=int(val.get("k_final", default.get(key, default["default"]).k_final)),
-                gate=GateConfig(
-                    mode=str(gate.get("mode", default.get(key, default["default"]).gate.mode)),
-                    sections=list(gate.get("sections", default.get(key, default["default"]).gate.sections)),
-                    weight=float(gate.get("weight", default.get(key, default["default"]).gate.weight)),
-                ),
-            )
-        # гарантуємо наявність дефолтів
-        for k, v in default.items():
-            out.setdefault(k, v)
-        return out
-
-
-# ------------------- engine -------------------
-@dataclass
-class ParquetHybridEngine:
-    index_dir: Path
-    doc_index_dir: Path
-    embed_model_name: str
-    ce_model_name: str
-    rrf_alpha: float = 60.0
-    use_rewrite: bool = False
-    aliases_csv: Optional[Path] = None
-    rewrite_max_terms: int = 5
-    intent_policy_map: Dict[str, IntentPolicy] = field(default_factory=dict)
-    dump_eval_dir: Optional[Path] = None
-    priors_jsonl: Optional[Path] = None
-
-    # runtime
-    encoder: Any = field(init=False, default=None)
-    faiss_index: Any = field(init=False, default=None)
-    doc_prefilter: Any = field(init=False, default=None)
-    chunks_df: Optional[pd.DataFrame] = field(init=False, default=None)
-    ce: Any = field(init=False, default=None)
-    expander: Optional[AliasExpander] = field(init=False, default=None)
-    priors: Optional[ClinicalPriors] = field(init=False, default=None)
-
-    def __post_init__(self):
-        # load vectors / indices
-        if faiss is None:
-            raise RuntimeError("faiss is not available")
-        faiss_path = self.index_dir / "faiss.index"
-        if not faiss_path.exists():
-            raise FileNotFoundError(f"FAISS index not found: {faiss_path}")
-        self.faiss_index = faiss.read_index(str(faiss_path))
-        print(f"[INFO] FAISS loaded: faiss.index | dim={self.faiss_index.d}")
-
-        # query encoder
-        if SentenceTransformer is None:
-            raise RuntimeError("sentence-transformers is required")
-        self.encoder = SentenceTransformer(self.embed_model_name)
-        print(f"[INFO] Query encoder ready: {self.embed_model_name}")
-
-        # doc prefilter (опційно)
-        doc_index_path = self.doc_index_dir / "doc.index"
-        if doc_index_path.exists():
-            try:
-                self.doc_prefilter = faiss.read_index(str(doc_index_path))
-                print(f"[INFO] Doc prefilter ready: n=?, dim={self.doc_prefilter.d}")
-            except Exception:
-                self.doc_prefilter = None
-        else:
-            print("[INFO] Doc prefilter not found (optional).")
-
-        # chunks parquet (щоб мати метадані / тексти, а також правильну колонку id)
-        chunks_parquet = self.index_dir / "chunks.parquet"
-        if not chunks_parquet.exists():
-            raise FileNotFoundError(f"Parquet not found: {chunks_parquet}")
-        table = pq.read_table(str(chunks_parquet), memory_map=True)
-        self.chunks_df = table.to_pandas()
-        # стандартизуємо id колонку
-        if "id" not in self.chunks_df.columns:
-            alt = _first_existing_column(self.chunks_df, ["chunk_id", "pid", "row_id"])
-            if alt:
-                self.chunks_df = self.chunks_df.rename(columns={alt: "id"})
-        if "id" not in self.chunks_df.columns:
-            # якщо зовсім немає - генеруємо
-            self.chunks_df["id"] = np.arange(len(self.chunks_df))
-        # уніфікуємо тип
-        self.chunks_df["id"] = self.chunks_df["id"].astype(int)
-
-        # cross-encoder
-        if FlagReranker is None:
-            raise RuntimeError("FlagEmbedding (FlagReranker) is required for CE")
-        self.ce = FlagReranker(self.ce_model_name, use_fp16=True)
-        print(f"[INFO] CrossEncoder active: {self.ce_model_name}")
-
-        # alias expander
-        if self.use_rewrite and self.aliases_csv and self.aliases_csv.exists():
-            self.expander = AliasExpander(str(self.aliases_csv))
-        else:
-            self.expander = None
-
-        # priors
-        if self.priors_jsonl and ClinicalPriors is not None and Path(self.priors_jsonl).exists():
-            self.priors = ClinicalPriors(str(self.priors_jsonl), allow_intents=("indication", "unknown"))
-            print(f"[INFO] Clinical priors loaded: {len(self.priors.entries)}")
-        else:
-            self.priors = None
-
-    # ---- retrieval helpers ----
-    def _embed(self, texts: List[str]) -> np.ndarray:
-        return np.asarray(self.encoder.encode(texts, batch_size=32, convert_to_numpy=True, show_progress_bar=False))
-
-    def _faiss_topk(self, q_vec: np.ndarray, k: int) -> Tuple[np.ndarray, np.ndarray]:
-        # q_vec: (1, dim)
-        D, I = self.faiss_index.search(q_vec, k)
-        return D[0], I[0]
-
-    def _fetch_chunks(self, ids: List[int]) -> pd.DataFrame:
-        if not ids:
-            return self.chunks_df.iloc[0:0].copy()
-        df = self.chunks_df
-        sub = df[df["id"].isin(ids)].copy()
-        return sub
-
-    def _apply_ce(self, query: str, cand_df: pd.DataFrame, top_k: int = 200) -> Tuple[pd.DataFrame, Dict[int, float]]:
-        if cand_df.empty:
-            return cand_df, {}
-        # готуємо пари
-        texts = cand_df.get("text")
-        if texts is None:
-            text_col = _first_existing_column(cand_df, ["text", "chunk_text", "body"])
-            if text_col is None:
-                # нічого не можемо зробити
-                return cand_df, {}
-            texts = cand_df[text_col]
-
-        pairs = [[query, t] for t in texts.tolist()]
-        scores = self.ce.compute_score(pairs, normalize=True)  # already in [0,1]
-        cand_df = cand_df.copy()
-        cand_df["ce_norm"] = scores
-        # відсортуємо по ce
-        cand_df = cand_df.sort_values("ce_norm", ascending=False)
-        # повернемо до top_k
-        cand_df = cand_df.head(min(len(cand_df), top_k)).reset_index(drop=True)
-        ce_map = {int(row["id"]): float(row["ce_norm"]) for _, row in cand_df.iterrows()}
-        return cand_df, ce_map
-
-    # ---- main search once ----
-    def search_once(
-        self,
-        q_raw: str,
-        intent: str,
-        policy: IntentPolicy,
-        rrf_alpha: float,
-        rewrite_max_terms: int = 5,
-        dump_dir: Optional[Path] = None,
-        q_id: Optional[str] = None,
-    ) -> Dict[str, Any]:
-        t0 = time.time()
-        trace: Dict[str, Any] = {"q_raw": q_raw, "intent": intent}
-        # 1) normalize
-        q_norm = normalize_query(q_raw)
-        trace["q_norm"] = q_norm
-
-        # 2) rewrite (aliases)
-        q_variants: List[str] = [q_norm]
-        if self.use_rewrite and self.expander is not None:
-            try:
-                expansions = self.expander.expand(q_norm, max_terms=rewrite_max_terms) or []
-                if expansions:
-                    q_variants = [q_norm] + expansions
-            except Exception:
-                pass
-        trace["q_variants"] = q_variants
-
-        # 3) clinical priors (дозволяємо для indication та unknown)
-        prior_hit = None
-        prior_terms: List[str] = []
-        if self.priors is not None and intent in ("indication", "unknown"):
-            try:
-                prior_hit = self.priors.match(q_norm, intent)
-                if prior_hit:
-                    prior_terms = list(dict.fromkeys(prior_hit.get("terms", [])))[:3]
-                    if prior_terms:
-                        # терми додаємо в перший BM25-варіант (тут це перший текстовий варіант запиту)
-                        q_variants[0] = (q_variants[0] + " " + " ".join(prior_terms)).strip()
-            except Exception:
-                prior_hit = None
-                prior_terms = []
-        trace["priors"] = {
-            "enabled": self.priors is not None,
-            "matched_prior": bool(prior_hit),
-            "prior_terms": prior_terms,
-            "prior_id": prior_hit.get("matched_id") if prior_hit else None,
-            "matched_trigger": prior_hit.get("matched_trigger") if prior_hit else None,
-        }
-
-        # 4) dense retrieval (через FAISS) по першому варіанту (як основному)
-        q_for_dense = q_variants[0] if q_variants else q_norm
-        q_vec = self._embed([q_for_dense])
-        # беремо doc_topN як верхню межу кандидатів
-        doc_topN = int(policy.doc_topN)
-        D, I = self._faiss_topk(q_vec, k=doc_topN)
-        cand_ids = [int(i) for i in I.tolist() if i >= 0]
-        trace["faiss"] = {"topN": doc_topN, "cand_count": len(cand_ids)}
-
-        # 5) забираємо кандидати
-        cand_df = self._fetch_chunks(cand_ids)
-
-        # 6) CE rerank (без додаткових ваг — використовуємо нормовані ce_norm)
-        ce_top = min(200, policy.k_final)
-        cand_df, ce_map = self._apply_ce(q_for_dense, cand_df, top_k=ce_top)
-        trace["ce"] = {"used": True, "top": ce_top, "scored": len(cand_df)}
-
-        # 7) фінальний зріз k_final
-        final_k = min(policy.k_final, len(cand_df))
-        final_df = cand_df.head(final_k).reset_index(drop=True)
-        results = [{"id": int(r["id"]), "score": float(r.get("ce_norm", 0.0))} for _, r in final_df.iterrows()]
-
-        elapsed = time.time() - t0
-
-        out = {
-            "query": q_raw,
-            "intent": intent,
-            "q_norm": q_norm,
-            "q_effective": q_for_dense,
-            "k": int(policy.k_final),
-            "doc_topN": int(policy.doc_topN),
-            "results": results,
-            "elapsed_sec": elapsed,
-            "trace": trace,
-        }
-
-        # 8) dump у runs (один файл на запит)
-        if dump_dir:
-            _ensure_dir(dump_dir)
-            fname = f"{q_id or 'q'}{'' if q_id and q_id.startswith('q') else ''}.json"
-            # якщо q_id вигляду "q0007" — файлик буде "q0007.json"
-            out_path = dump_dir / (f"{q_id}.json" if q_id else f"q.json")
-            with open(out_path, "w", encoding="utf-8") as f:
-                json.dump(out, f, ensure_ascii=False, indent=2, default=_json_default)
-
-        return out
-
-
-# ------------------- metrics & eval -------------------
 def precision_at_k(pred_ids: List[int], gold_ids: List[int], k: int) -> float:
-    if k <= 0:
+    if not gold_ids:
         return 0.0
     pred = pred_ids[:k]
-    if not pred:
-        return 0.0
     inter = len(set(pred) & set(gold_ids))
     return inter / float(k)
 
-
-def recall_at_k(pred_ids: List[int], gold_ids: List[int], k: int) -> float:
+def recall_at_k(rank_all: List[int], gold_ids: List[int], k: int) -> float:
     if not gold_ids:
         return 0.0
-    pred = pred_ids[:k]
+    pred = rank_all[:k]
     inter = len(set(pred) & set(gold_ids))
     return inter / float(len(gold_ids))
 
-
-def ndcg_at_k(pred_ids: List[int], gold_ids: List[int], k: int) -> float:
+def ndcg_at_k(rank_all: List[int], gold_ids: List[int], k: int) -> float:
     if not gold_ids:
         return 0.0
-    pred = pred_ids[:k]
+    gold = set(gold_ids)
     dcg = 0.0
-    for i, pid in enumerate(pred, start=1):
-        if pid in gold_ids:
-            dcg += 1.0 / math.log2(i + 1)
-    # ideal
-    ideal_hits = min(len(gold_ids), k)
-    idcg = sum(1.0 / math.log2(i + 1) for i in range(1, ideal_hits + 1))
-    return dcg / idcg if idcg > 0 else 0.0
+    for r, pid in enumerate(rank_all[:k]):
+        if pid in gold:
+            dcg += 1.0 / np.log2(r + 2.0)  # r is 0-based
+    ideal = min(len(gold_ids), k)
+    idcg = sum(1.0 / np.log2(i + 2.0) for i in range(ideal))
+    return float(dcg / (idcg + 1e-9))
 
+# ------------------- RRF / WRRF -------------------
 
-def evaluate(
-    engine: ParquetHybridEngine,
-    queries_path: Path,
-    policy_map: Dict[str, IntentPolicy],
-    rrf_alpha: float,
-    dump_eval_dir: Optional[Path] = None,
-    subset_tag: str = "full",
-) -> Dict[str, Any]:
-    # читаємо JSONL
-    data: List[Dict[str, Any]] = []
-    with open(queries_path, "r", encoding="utf-8") as f:
-        for line in f:
-            if not line.strip():
-                continue
-            data.append(json.loads(line))
+try:
+    from search.wrrf_fusion import rrf, weighted_rrf  # твій модуль (вже є в репо)
+except Exception:
+    from math import inf
+    def rrf(ranks_a: Dict[int, int], ranks_b: Dict[int, int], alpha: float = 60.0):
+        ids = set(ranks_a) | set(ranks_b)
+        out = {}
+        for d in ids:
+            ra = ranks_a.get(d, inf)
+            rb = ranks_b.get(d, inf)
+            sa = 0.0 if ra is inf else 1.0 / (alpha + ra)
+            sb = 0.0 if rb is inf else 1.0 / (alpha + rb)
+            out[d] = sa + sb
+        return sorted(out.items(), key=lambda x: x[1], reverse=True)
 
-    print(f"[INFO] Loaded queries: {len(data)}")
+    def weighted_rrf(ranks_bm25: Dict[int, int], ranks_dense: Dict[int, int],
+                     alpha: float = 60.0, w_bm25: float = 1.0, w_dense: float = 1.0):
+        ids = set(ranks_bm25) | set(ranks_dense)
+        out = {}
+        for d in ids:
+            rb = ranks_bm25.get(d, inf)
+            rd = ranks_dense.get(d, inf)
+            sb = 0.0 if rb is inf else (w_bm25 / (alpha + rb))
+            sd = 0.0 if rd is inf else (w_dense / (alpha + rd))
+            out[d] = sb + sd
+        return sorted(out.items(), key=lambda x: x[1], reverse=True)
 
-    # каталоги логів
-    run_dir: Optional[Path] = None
-    if dump_eval_dir:
-        run_dir = dump_eval_dir / f"run_{_now_ts()}"
-        _ensure_dir(run_dir)
+# ------------------- CrossEncoder backends -------------------
 
-    # прогін
-    all_prec10: List[float] = []
-    all_recall300: List[float] = []
-    all_ndcg300: List[float] = []
+_FlagReranker = None
+try:
+    from FlagEmbedding import FlagReranker as _FlagReranker
+except Exception:
+    pass
 
-    for idx, item in enumerate(data):
-        q = item.get("query", "")
-        intent = item.get("intent", "unknown")
-        gold_ids = _safe_to_list(item.get("gold_doc_ids", []))
+_CrossEncoder = None
+try:
+    from sentence_transformers import CrossEncoder as _CrossEncoder
+except Exception:
+    pass
 
-        policy = policy_map.get(intent, policy_map.get("default", IntentPolicy()))
-        qid = f"q{idx:04d}"
+def _softmax(x: List[float]) -> List[float]:
+    a = np.array(x, dtype=np.float32)
+    a -= a.max()
+    e = np.exp(a)
+    return (e / (e.sum() + 1e-9)).tolist()
 
-        out = engine.search_once(
-            q_raw=q,
-            intent=intent,
-            policy=policy,
-            rrf_alpha=rrf_alpha,
-            rewrite_max_terms=engine.rewrite_max_terms,
-            dump_dir=run_dir,
-            q_id=qid,
-        )
+# ------------------- Pipeline -------------------
 
-        preds = [int(r["id"]) for r in out.get("results", [])]
+class WRRFCEPipeline:
+    """
+    Dense(FAISS) + BM25 -> (W)RRF -> (optional) CE -> doc-level mix -> топ-K.
+    Пише qNNNN.json із pred_doc_ids (канонічні) та results (id, score).
+    """
+    def __init__(
+        self,
+        index_dir: Path,
+        faiss_index: faiss.Index,
+        encode_fn,  # (List[str]) -> np.ndarray [n, dim]
+        rrf_alpha: float = 90.0,
+        w_bm25: float = 2.0,
+        w_dense: float = 1.0,
+        k_bm25: int = 100,
+        k_dense: int = 100,
+        fused_top: int = 300,
+        k_out: int = 10,
+        bm25_truncate_tokens: int = 64,
+        ce_model_name: str = "",
+        ce_top: int = 60,
+        ce_weight: float = 0.7,
+        ce_batch: int = 8,
+    ):
+        self.index_dir = Path(index_dir)
+        self.faiss = faiss_index
+        self.encode_fn = encode_fn
+        self.rrf_alpha = float(rrf_alpha)
+        self.w_bm25 = float(w_bm25)
+        self.w_dense = float(w_dense)
+        self.k_bm25 = int(k_bm25)
+        self.k_dense = int(k_dense)
+        self.fused_top = int(fused_top)
+        self.k_out = int(k_out)
+        self.bm25_trunc = int(bm25_truncate_tokens)
+        self.ce_top = int(ce_top)
+        self.ce_weight = float(ce_weight)
+        self.ce_batch = int(ce_batch)
+        self.ce = None
+        self.ce_name = (ce_model_name or "").strip()
 
-        p10 = precision_at_k(preds, gold_ids, 10)
-        r300 = recall_at_k(preds, gold_ids, 300)
-        n300 = ndcg_at_k(preds, gold_ids, 300)
+        # --------- load chunks & mappings ---------
+        p_chunks = None
+        for c in [self.index_dir / "chunks.parquet", self.index_dir.parent / "chunks.parquet"]:
+            if c.exists():
+                p_chunks = c
+                break
+        if p_chunks is None:
+            raise FileNotFoundError("chunks.parquet not found near index_dir")
 
-        all_prec10.append(p10)
-        all_recall300.append(r300)
-        all_ndcg300.append(n300)
+        pf = pq.ParquetFile(p_chunks)
+        cols = set(pf.schema_arrow.names)
+        text_col = "text" if "text" in cols else ("chunk_text" if "chunk_text" in cols else None)
+        if text_col is None:
+            raise RuntimeError(f"No text column in chunks.parquet; got: {sorted(cols)}")
 
-    # агрегат
-    P10 = float(np.mean(all_prec10)) if all_prec10 else 0.0
-    R300 = float(np.mean(all_recall300)) if all_recall300 else 0.0
-    NDCG300 = float(np.mean(all_ndcg300)) if all_ndcg300 else 0.0
+        use_cols = [text_col]
+        doc_col = None
+        if "doc_id" in cols:
+            doc_col = "doc_id"
+            use_cols.append("doc_id")
+        df = pd.read_parquet(p_chunks, columns=use_cols)
+        self.pass_texts = df[text_col].astype(str).tolist()
+        if doc_col is not None:
+            self.pid2doc = df[doc_col].to_numpy()
+            pidmap_src = "chunks:doc_id"
+        else:
+            npy = None
+            for c in [self.index_dir / "doc_ids.npy", self.index_dir.parent / "doc_ids.npy"]:
+                if c.exists():
+                    npy = c
+                    break
+            if npy is None:
+                raise FileNotFoundError("Neither chunks:doc_id nor doc_ids.npy found")
+            self.pid2doc = np.load(npy)
+            pidmap_src = "doc_ids.npy"
+        del df
+
+        print(f"[INFO] BM25 corpus: {len(self.pass_texts)} passages")
+        # компактний BM25 через триммінг токенів
+        if self.bm25_trunc > 0:
+            corpus = [" ".join(t.split()[: self.bm25_trunc]) for t in self.pass_texts]
+        else:
+            corpus = self.pass_texts
+        self._bm25_tok = [c.lower().split() for c in corpus]
+        self.bm25 = BM25Okapi(self._bm25_tok)
+        print(f"[INFO] BM25 ready (truncate={self.bm25_trunc})")
+        print(f"[INFO] PID→DOC source: {pidmap_src}")
+
+        # --------- CrossEncoder (optional) ---------
+        cm = self.ce_name.lower()
+        if cm and cm not in ("none", "off", "0") and self.ce_top > 0:
+            if _FlagReranker is not None and ("bge-reranker" in cm or "baai/" in cm):
+                self.ce = _FlagReranker(self.ce_name, use_fp16=True)
+                self._ce_type = "flag"
+            elif _CrossEncoder is not None:
+                self.ce = _CrossEncoder(self.ce_name)
+                self._ce_type = "st"
+            else:
+                self.ce = None
+                self._ce_type = "none"
+                print("[WARN] CE requested but backends are unavailable (FlagEmbedding / sentence-transformers).")
+            if self.ce is not None:
+                print(f"[INFO] CrossEncoder active: {self.ce_name} (type={self._ce_type})")
+        else:
+            self._ce_type = "none"
+            print("[INFO] CrossEncoder disabled")
+
+    # --------- low-level helpers ---------
+
+    def _dense_topk(self, q_text: str, k: int) -> List[Tuple[int, float]]:
+        qv = self.encode_fn([q_text])[0].astype(np.float32)[None, :]
+        D, I = self.faiss.search(qv, k)
+        return [(int(i), float(d)) for i, d in zip(I[0].tolist(), D[0].tolist()) if i >= 0]
+
+    def _bm25_topk(self, q_text: str, k: int) -> List[Tuple[int, float]]:
+        qtok = q_text.lower().split()
+        scores = self.bm25.get_scores(qtok)
+        idx = np.argpartition(scores, -k)[-k:]
+        idx = idx[np.argsort(scores[idx])[::-1]]
+        return [(int(i), float(scores[i])) for i in idx]
+
+    @staticmethod
+    def _ranks(id_and_score: List[Tuple[int, float]]) -> Dict[int, int]:
+        return {int(i): (r + 1) for r, (i, _) in enumerate(id_and_score)}
+
+    def _fuse_passages(self, q_text: str) -> List[int]:
+        top_dense = self._dense_topk(q_text, self.k_dense)
+        top_bm25 = self._bm25_topk(q_text, self.k_bm25)
+        r_dense = self._ranks(top_dense)
+        r_bm25 = self._ranks(top_bm25)
+        if self.w_bm25 == 1.0 and self.w_dense == 1.0:
+            fused = rrf(r_bm25, r_dense, alpha=self.rrf_alpha)
+        else:
+            fused = weighted_rrf(r_bm25, r_dense, alpha=self.rrf_alpha,
+                                 w_bm25=self.w_bm25, w_dense=self.w_dense)
+        pids = [pid for pid, _ in fused[: self.fused_top]]
+        return pids
+
+    def _ce_rescore(self, q_text: str, cand_pids: List[int]) -> Dict[int, float]:
+        if self.ce is None or self._ce_type == "none" or self.ce_top <= 0:
+            return {}
+        keep = cand_pids[: self.ce_top]
+        pairs = [(q_text, self.pass_texts[pid]) for pid in keep]
+        scores: List[float] = []
+        if self._ce_type == "flag":
+            # FlagEmbedding: compute_score(..., normalize=True) -> [0,1]
+            for i in range(0, len(pairs), self.ce_batch):
+                chunk = pairs[i : i + self.ce_batch]
+                s = self.ce.compute_score(chunk, normalize=True)
+                scores.extend([float(x) for x in s])
+        else:
+            # sentence-transformers CrossEncoder: повертає логіти; зробимо softmax
+            for i in range(0, len(pairs), self.ce_batch):
+                chunk = pairs[i : i + self.ce_batch]
+                s = self.ce.predict(chunk)
+                if isinstance(s, list):
+                    scores.extend([float(x) for x in s])
+                else:
+                    scores.extend([float(x) for x in s.tolist()])
+            scores = _softmax(scores)
+        return {pid: float(sc) for pid, sc in zip(keep, scores)}
+
+    def _aggregate_to_docs(self, pid_list: List[int], pid2score: Dict[int, float] | None) -> List[Tuple[int, float]]:
+        """
+        Переносимо passage-level у doc-level: max-score per doc.
+        Якщо pid2score=None — використовуємо зворотний ранг (вище → краще).
+        Повертаємо відсортовану пару (doc_id, score в [0,1]).
+        """
+        if not pid_list:
+            return []
+        doc2score: Dict[int, float] = {}
+        if pid2score is None:
+            for r, pid in enumerate(pid_list):
+                doc = int(self.pid2doc[pid])
+                base = 1.0 / (r + 1)  # простий ранг-скор
+                if doc not in doc2score or base > doc2score[doc]:
+                    doc2score[doc] = base
+        else:
+            for pid, sc in pid2score.items():
+                doc = int(self.pid2doc[pid])
+                base = float(sc)
+                if doc not in doc2score or base > doc2score[doc]:
+                    doc2score[doc] = base
+
+        docs, scores = zip(*doc2score.items())
+        s = np.array(scores, dtype=np.float32)
+        s = (s - s.min()) / (s.max() - s.min() + 1e-9)
+        return sorted(zip([int(d) for d in docs], s.tolist()), key=lambda x: x[1], reverse=True)
+
+    def run_once(self, q_text: str, run_dir: Path, q_idx: int, out_k: int | None = None) -> Tuple[List[int], List[int]]:
+        out_k = out_k or self.k_out
+
+        # 1) (W)RRF на passage-level
+        fused_pids = self._fuse_passages(q_text)
+
+        # 2) CE (опційно) поверх fused_pids[:ce_top]
+        ce_scores = self._ce_rescore(q_text, fused_pids)
+
+        # 3) doc-level агрегати
+        doc_fusion = self._aggregate_to_docs(fused_pids, pid2score=None)                  # з позицій фʼюжну
+        doc_ce     = self._aggregate_to_docs(list(ce_scores.keys()), pid2score=ce_scores) if ce_scores else []
+
+        # 4) змішування каналів
+        mix: Dict[int, float] = {}
+        def _acc(docscores: List[Tuple[int,float]], w: float):
+            for d, s in docscores:
+                mix[d] = mix.get(d, 0.0) + w * s
+
+        if doc_fusion:
+            _acc(doc_fusion, 1.0 - self.ce_weight)
+        if doc_ce:
+            _acc(doc_ce, self.ce_weight)
+
+        final_all = sorted(mix.items(), key=lambda x: x[1], reverse=True)
+        final_top = final_all[: out_k]
+        pred_doc_ids = [int(d) for d, _ in final_top]
+        doc_rank_all = [int(d) for d, _ in final_all]  # для метрик@300
+
+        # 5) qNNNN.json
+        out = {
+            "query": q_text,
+            "k": out_k,
+            "rrf_alpha": self.rrf_alpha,
+            "w_bm25": self.w_bm25,
+            "w_dense": self.w_dense,
+            "k_bm25": self.k_bm25,
+            "k_dense": self.k_dense,
+            "fused_top": self.fused_top,
+            "bm25_truncate_tokens": self.bm25_trunc,
+            "ce_model": self.ce_name or "none",
+            "ce_top": self.ce_top,
+            "ce_weight": self.ce_weight,
+            "pred_doc_ids": pred_doc_ids,
+            "doc_rank_topN": doc_rank_all[:300],
+            "results": [{"id": int(d), "score": float(s)} for d, s in final_top],
+        }
+        (run_dir / f"q{q_idx:04d}.json").write_text(json.dumps(out, ensure_ascii=False), encoding="utf-8")
+        return pred_doc_ids, doc_rank_all
+
+# ------------------- main (CLI) -------------------
+
+def load_faiss_index(index_dir: Path) -> faiss.Index:
+    cand = [index_dir / "faiss.index", index_dir / "index" / "faiss.index"]
+    path = next((p for p in cand if p.exists()), None)
+    if not path:
+        raise FileNotFoundError(f"FAISS index not found in: {cand}")
+    index = faiss.read_index(str(path))
+    return index
+
+def main():
+    ap = argparse.ArgumentParser("Assistant from Parquet — hybrid FAISS + (W)RRF + optional CE (doc-level eval)")
+    ap.add_argument("--index_dir", required=True, type=str)
+    ap.add_argument("--doc_index_dir", type=str, default="")  # зарезервовано, не обовʼязково
+    ap.add_argument("--embed_model", type=str, default="intfloat/multilingual-e5-base")
+    ap.add_argument("--queries", required=True, type=str)
+    ap.add_argument("--intent_policy", type=str, default="")  # сумісність із твоїми скриптами
+    ap.add_argument("--dump_eval_dir", type=str, required=True)
+
+    # (W)RRF кноби
+    ap.add_argument("--rrf_alpha", type=float, default=90.0)
+    ap.add_argument("--use_weighted_rrf", action="store_true", default=True)
+    ap.add_argument("--w_bm25", type=float, default=2.0)
+    ap.add_argument("--w_dense", type=float, default=1.0)
+    ap.add_argument("--k_bm25", type=int, default=100)
+    ap.add_argument("--k_dense", type=int, default=100)
+    ap.add_argument("--fused_top", type=int, default=300)
+    ap.add_argument("--k", dest="k_out", type=int, default=10, help="top-K docs to output")
+    ap.add_argument("--bm25_truncate_tokens", type=int, default=64)
+
+    # CE кноби
+    ap.add_argument("--ce_model", type=str, default="", help="BAAI/bge-reranker-v2-m3 | cross-encoder/ms-marco-... | 'none'")
+    ap.add_argument("--ce_top", type=int, default=60)
+    ap.add_argument("--ce_weight", type=float, default=0.7)
+    ap.add_argument("--ce_batch", type=int, default=8)
+
+    args = ap.parse_args()
+
+    index_dir = Path(args.index_dir).expanduser().resolve()
+    dump_dir = ensure_dir(Path(args.dump_eval_dir).expanduser().resolve())
+    run_dir = ensure_dir(dump_dir / f"run_{ts_now()}")
+
+    # ---------- FAISS + Encoder ----------
+    index = load_faiss_index(index_dir)
+    dim = index.d
+    print(f"[INFO] FAISS loaded: faiss.index | dim={dim}")
+
+    enc = SentenceTransformer(args.embed_model)
+    print(f"[INFO] Query encoder ready: {args.embed_model}")
+
+    def _encode_fn(texts: List[str]) -> np.ndarray:
+        # нормалізація корисна, якщо індекс побудовано під cos/IP
+        return enc.encode(texts, normalize_embeddings=True)
+
+    # ---------- Pipeline ----------
+    # якщо вважаєш за краще чистий RRF — можеш подати --w_bm25 1 --w_dense 1
+    pipe = WRRFCEPipeline(
+        index_dir=index_dir,
+        faiss_index=index,
+        encode_fn=_encode_fn,
+        rrf_alpha=args.rrf_alpha,
+        w_bm25=args.w_bm25,
+        w_dense=args.w_dense,
+        k_bm25=args.k_bm25,
+        k_dense=args.k_dense,
+        fused_top=args.fused_top,
+        k_out=args.k_out,
+        bm25_truncate_tokens=args.bm25_truncate_tokens,
+        ce_model_name=args.ce_model,
+        ce_top=args.ce_top,
+        ce_weight=args.ce_weight,
+        ce_batch=args.ce_batch,
+    )
+
+    # ---------- Queries ----------
+    qpath = Path(args.queries).expanduser().resolve()
+    queries = list(iter_jsonl(qpath))
+    print(f"[INFO] Loaded queries: {len(queries)}")
+
+    # ---------- Run ----------
+    pred_rows = []
+    n_with_gold = 0
+    p10s, r300s, ndcg300s = [], [], []
+
+    for qi, item in enumerate(tqdm(queries, desc="Eval", ncols=100), start=0):
+        q_text = pick_query_text(item)
+        topk_docs, rank_all = pipe.run_once(q_text=q_text, run_dir=run_dir, q_idx=qi, out_k=args.k_out)
+
+        gold_ids = load_gold_ids(item)
+        if gold_ids:
+            n_with_gold += 1
+            p10s.append(precision_at_k(topk_docs, gold_ids, 10))
+            r300s.append(recall_at_k(rank_all, gold_ids, 300))
+            ndcg300s.append(ndcg_at_k(rank_all, gold_ids, 300))
+
+        # preds.csv рядок (компактно)
+        row = {
+            "qid": qi + 1,
+            "query": q_text,
+            "pred_doc_ids": json.dumps([int(x) for x in topk_docs], ensure_ascii=False),
+            "gold_doc_ids": json.dumps([int(x) for x in gold_ids], ensure_ascii=False),
+        }
+        pred_rows.append(row)
+
+    # ---------- Metrics dump ----------
+    if n_with_gold > 0:
+        P10 = float(np.mean(p10s)) if p10s else 0.0
+        R300 = float(np.mean(r300s)) if r300s else 0.0
+        NDCG300 = float(np.mean(ndcg300s)) if ndcg300s else 0.0
+    else:
+        P10 = R300 = NDCG300 = 0.0
+
+    preds_path = run_dir / "preds.csv"
+    pd.DataFrame(pred_rows).to_csv(preds_path, index=False)
+    print(f"[OK] predictions -> {preds_path}")
+
+    metrics = {
+        "Precision@10": P10,
+        "Recall@300": R300,
+        "nDCG@300": NDCG300,
+        "N": len(queries),
+        "N_with_gold": n_with_gold,
+        "subset": "full",
+    }
+    with open(run_dir / "metrics.json", "w", encoding="utf-8") as f:
+        json.dump(metrics, f, ensure_ascii=False, indent=2)
 
     print("\n=== METRICS ===")
     print(f"Precision@10: {P10:.4f}")
-    print(f"Recall@300: {R300:.4f}")
-    print(f"nDCG@300: {NDCG300:.4f}")
-    print(f"N: {len(data)}")
-    print(f"subset: {subset_tag}")
-
-    if run_dir:
-        with open(run_dir / "metrics.json", "w", encoding="utf-8") as f:
-            json.dump(
-                {
-                    "subset": subset_tag,
-                    "N": len(data),
-                    "Precision@10": P10,
-                    "Recall@300": R300,
-                    "nDCG@300": NDCG300,
-                },
-                f,
-                ensure_ascii=False,
-                indent=2,
-                default=_json_default,
-            )
-
-    return {"P10": P10, "R300": R300, "NDCG300": NDCG300, "N": len(data), "subset": subset_tag}
-
-
-# ------------------- cli -------------------
-def build_argparser() -> argparse.Namespace:
-    p = argparse.ArgumentParser(
-        "Assistant from Parquet — hybrid FAISS + CE (+ rewrite + priors) eval",
-        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
-    )
-    p.add_argument("--index_dir", required=True, type=Path)
-    p.add_argument("--doc_index_dir", required=True, type=Path)
-    p.add_argument("--embed_model", default="intfloat/multilingual-e5-base", type=str)
-    p.add_argument("--ce_model", default="BAAI/bge-reranker-v2-m3", type=str)
-    p.add_argument("--queries", required=True, type=Path)
-
-    p.add_argument("--intent_policy", type=Path, default=None)
-    p.add_argument("--rrf_alpha", type=float, default=60.0)
-
-    # rewrite
-    p.add_argument("--use_rewrite", action="store_true")
-    p.add_argument("--rewrite_aliases_csv", type=Path, default=None)
-    p.add_argument("--rewrite_max_terms", type=int, default=5)
-
-    # priors
-    p.add_argument("--priors_jsonl", type=Path, default=None)
-
-    # dumps
-    p.add_argument("--dump_eval_dir", type=Path, default=None)
-
-    return p.parse_args()
-
-
-def main():
-    args = build_argparser()
-
-    policy_map = IntentPolicy.from_yaml(str(args.intent_policy) if args.intent_policy else None)
-
-    engine = ParquetHybridEngine(
-        index_dir=args.index_dir,
-        doc_index_dir=args.doc_index_dir,
-        embed_model_name=args.embed_model,
-        ce_model_name=args.ce_model,
-        rrf_alpha=args.rrf_alpha,
-        use_rewrite=bool(args.use_rewrite),
-        aliases_csv=args.rewrite_aliases_csv,
-        rewrite_max_terms=int(args.rewrite_max_terms),
-        intent_policy_map=policy_map,
-        dump_eval_dir=args.dump_eval_dir,
-        priors_jsonl=args.priors_jsonl,
-    )
-
-    subset = "full"
-    metrics = evaluate(
-        engine=engine,
-        queries_path=args.queries,
-        policy_map=policy_map,
-        rrf_alpha=args.rrf_alpha,
-        dump_eval_dir=args.dump_eval_dir,
-        subset_tag=subset,
-    )
-
+    print(f"Recall@300:   {R300:.4f}")
+    print(f"nDCG@300:     {NDCG300:.4f}")
+    print(f"N: {len(queries)} (with gold: {n_with_gold})")
+    print(f"run_dir: {run_dir}")
 
 if __name__ == "__main__":
     main()
