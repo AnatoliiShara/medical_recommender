@@ -10,7 +10,7 @@ venv/
 *.log
 .DS_Store
 
-# --- Terraform junk ---
+# --- Terraform ---
 .terraform/
 terraform.tfstate*
 *.tfstate.backup
@@ -30,11 +30,11 @@ data/sample/
 # Винятки: легкі службові каталоги з метаданими/оцінками
 !data/dicts/**
 !data/eval/**
-# але не зберігати туди автогенеровані ран-и
+# але не зберігати автогенеровані ран-и
 data/eval/runs*/
 data/eval/**/runs*/
 
-# --- Великі бінарники за розширенням ---
+# --- Великі бінарники ---
 *.parquet
 *.feather
 *.csv.gz
@@ -58,6 +58,5 @@ data/eval/**/runs*/
 *.index
 faiss.index
 
-# --- Misc ---
 *.sqlite
 *.db
