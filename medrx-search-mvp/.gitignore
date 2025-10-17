@@ -1,41 +1,63 @@
-# venv / IDE
-venv/
-.pytype/
-.mypy_cache/
+# --- Python / venv / cache ---
 __pycache__/
-*.pyc
+*.py[cod]
+*.pyo
+.venv/
+venv/
+.env
 .ipynb_checkpoints/
+.pytest_cache/
+*.log
 .DS_Store
 
-# дані/артефакти/моделі (великі)
-data/raw/
-data/processed/
+# --- Terraform junk ---
+.terraform/
+terraform.tfstate*
+*.tfstate.backup
+
+# --- Data & artifacts (важкі) ---
 artifacts_backup/
 runs/
 checkpoints/
 models/
-notebooks/
+
+data/raw/
+data/interim/
+data/processed/
+data/priors/
+data/sample/
+
+# Винятки: легкі службові каталоги з метаданими/оцінками
+!data/dicts/**
+!data/eval/**
+# але не зберігати туди автогенеровані ран-и
+data/eval/runs*/
+data/eval/**/runs*/
+
+# --- Великі бінарники за розширенням ---
 *.parquet
-*.faiss
-faiss.index
-*.npy
-*.npz
-*.pt
-*.bin
-*.onnx
-*.pkl
-*.log
-*.gz
-*.xz
+*.feather
+*.csv.gz
 *.zip
 *.tar
-*.7z
+*.tar.gz
+*.tgz
 
-# дозволяємо дрібні словники/скрипти/евал-списки
-!data/dicts/**
-!data/eval/*.jsonl
-!data/eval/*.csv
+*.npy
+*.npz
+*.pkl
+*.bin
+*.pt
+*.pth
+*.ckpt
+*.onnx
+*.h5
+*.safetensors
 
-# docker / tf / misc
-docker/.env
-*.tfstate
+*.faiss
+*.index
+faiss.index
+
+# --- Misc ---
+*.sqlite
+*.db

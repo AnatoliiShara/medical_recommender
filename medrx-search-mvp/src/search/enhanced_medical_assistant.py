@@ -1,390 +1,373 @@
 # -*- coding: utf-8 -*-
+"""
+EnhancedMedicalAssistant
+------------------------
+Гібридний пошук для медичного датасету:
+BM25 + Dense (SentenceTransformer/FAISS-in-memory) -> Weighted-RRF -> (optional) CrossEncoder rerank
+з можливістю gate за секціями (require | prefer).
+
+Вимоги:
+    pip install rank-bm25 sentence-transformers numpy pandas pyyaml tqdm
+
+Примітки:
+- Модуль не читає зовнішні індекси з диска: він будує все "в пам'яті" з переданого DataFrame.
+- Для продакшн-шляху з FAISS на диску використовуйте assistant_from_parquet.py.
+"""
 from __future__ import annotations
-import math
+
+from dataclasses import dataclass, field
+from typing import Any, Dict, Iterable, List, Optional, Tuple, Literal
+
 import re
-from dataclasses import dataclass
-from typing import List, Dict, Optional, Tuple
-
+import math
 import numpy as np
-import pandas as pd
-from tqdm import tqdm
 
-# BM25
-from rank_bm25 import BM25Okapi
-
-# FAISS bi-encoder
 try:
-    import faiss  # type: ignore
-    FAISS_OK = True
-except Exception:
-    FAISS_OK = False
+    import pandas as pd  # type: ignore
+except Exception:  # pragma: no cover
+    pd = None  # pandas не обов'язковий для імпорту модуля
 
-from sentence_transformers import SentenceTransformer, CrossEncoder
+from rank_bm25 import BM25Okapi  # type: ignore
 
-# ---- Medical-aware chunking
-from preprocessing.medical_chunker import MedicalChunker
-
-# ---- Safety filter (handle file name typo gracefully)
-UserProfile = None
-MedicalSafetyFilter = None
 try:
-    from safety.medical_safety_filter import MedicalSafetyFilter as _MSF, UserProfile as _UP  # preferred
-    MedicalSafetyFilter, UserProfile = _MSF, _UP
-except Exception:
-    try:
-        from safety.medical_safery_filter import MedicalSafetyFilter as _MSF2, UserProfile as _UP2  # fallback
-        MedicalSafetyFilter, UserProfile = _MSF2, _UP2
-    except Exception:
-        class _StubUP:  # type: ignore
-            def __init__(self, **kwargs): pass
-        class _StubMSF:  # type: ignore
-            def assess_drug_safety(self, contraindications: str, user_profile=None):
-                return {'risk_score': 0, 'risk_level': 'LOW', 'warnings': [], 'critical_warnings': [], 'safe_to_use': True}
-        UserProfile, MedicalSafetyFilter = _StubUP, _StubMSF
+    from sentence_transformers import SentenceTransformer, CrossEncoder  # type: ignore
+except Exception as e:  # pragma: no cover
+    SentenceTransformer = None  # type: ignore
+    CrossEncoder = None  # type: ignore
 
-# ------------------------- utils -------------------------
+# ---------- Weighted-RRF ------------------------------------------------------
 
-def clean_text(s: str) -> str:
-    if not isinstance(s, str):
-        return ""
-    s = s.replace("\u00A0", " ")
-    s = re.sub(r"\s+", " ", s).strip()
-    return s
 
-def medical_chunk_text(txt: str, chunker: MedicalChunker, max_tokens: int = 256) -> List[str]:
-    """Use MedicalChunker instead of primitive chunking."""
-    txt = clean_text(txt).replace("[SEP]", ". ")  # важливо: робимо [SEP] sentence boundary
-    if not txt:
-        return []
-    return chunker.smart_chunking(txt, max_tokens=max_tokens, overlap_tokens=32, min_chunk_chars=60)
+def _weighted_rrf(
+    ranks_bm25: Dict[int, int],
+    ranks_dense: Dict[int, int],
+    alpha: float = 60.0,
+    w_bm25: float = 1.0,
+    w_dense: float = 1.0,
+) -> List[Tuple[int, float]]:
+    """
+    Weighted Reciprocal Rank Fusion
+        score = w_bm25/(alpha + rank_bm25) + w_dense/(alpha + rank_dense)
 
-def _bm25_tokens(s: str) -> List[str]:
-    """Lightweight UA/EN tokenization for BM25 (keep letters/digits from Latin + Cyrillic)."""
-    s = s.lower()
-    s = re.sub(r"[^\w\u0400-\u04FF]+", " ", s)
-    return s.split()
+    ranks_*: словники {pid -> rank}, rank починається з 1.
+    """
+    INF = 10**12
+    doc_ids = set(ranks_bm25) | set(ranks_dense)
+    out: Dict[int, float] = {}
+    for d in doc_ids:
+        rb = ranks_bm25.get(d, INF)
+        rd = ranks_dense.get(d, INF)
+        sb = 0.0 if rb == INF else (w_bm25 / (alpha + float(rb)))
+        sd = 0.0 if rd == INF else (w_dense / (alpha + float(rd)))
+        out[d] = sb + sd
+    return sorted(out.items(), key=lambda x: x[1], reverse=True)
 
-# ------------------------- index -------------------------
+
+# ---------- Конфіг ------------------------------------------------------------
+
 
 @dataclass
 class SearchConfig:
-    # RRF параметр (костанта k в 1/(k + rank)):
-    rrf_alpha: float = 60.0          # практичні значення: 60, 90, 120
-    top_k: int = 120
-    show: int = 120
-    prefer_indications: bool = True  # вмикаємо невеликий буст за замовчуванням
-    indications_boost: float = 0.05  # величина буста для секції "Показання"
-    ce_min: float = 0.15
-    ce_weight: float = 0.8
-    # new
-    enable_safety_filter: bool = True
-    medical_chunking: bool = True
-    max_chunk_tokens: int = 256
+    # Параметри відбору
+    top_k: int = 20
+    rrf_alpha: float = 60.0
+    w_bm25: float = 1.0
+    w_dense: float = 1.0
+
+    # Гейтинг за секціями
+    gate_mode: Literal["none", "prefer", "require"] = "none"
+    gate_sections: List[str] = field(default_factory=list)
+    prefer_boost: float = 1.10  # множник для prefer
+
+    # Cross-Encoder (опціонально)
+    ce_model: Optional[str] = None      # якщо задано — lazy load
+    ce_top: int = 0                     # скільки топів після ф’южну переоцінювати (0 = вимк.)
+    ce_weight: float = 0.70             # вага CE у final score (0..1)
+
+    # Побудова індексів
+    max_chunk_tokens: int = 128         # для слотів build_from_dataframe
+    indications_boost: float = 0.0      # легкий буст для "Показання" (необов'язково)
+
+
+# ---------- Утиліти -----------------------------------------------------------
+
+_WS_RE = re.compile(r"\s+", flags=re.U)
+_PUNCT_RE = re.compile(r"[^\w\u0400-\u04FF]+", flags=re.U)  # лат + кирилиця
+
+
+def _normalize_text(s: str) -> str:
+    s = s.strip().lower()
+    s = _WS_RE.sub(" ", s)
+    return s
+
+
+def _tokenize_ua(s: str) -> List[str]:
+    """Дуже простий токенайзер під UA/латиницю (без важких залежностей)."""
+    s = _normalize_text(s)
+    s = _PUNCT_RE.sub(" ", s)
+    toks = [t for t in s.split(" ") if t]
+    return toks
+
+
+def _split_by_tokens(text: str, max_tokens: int) -> List[str]:
+    toks = _tokenize_ua(text)
+    if not toks:
+        return []
+    out: List[str] = []
+    for i in range(0, len(toks), max_tokens):
+        out.append(" ".join(toks[i : i + max_tokens]))
+    return out
+
+
+# ---------- Клас пошуку -------------------------------------------------------
+
 
 class EnhancedMedicalAssistant:
-    def __init__(self):
-        self.df: Optional[pd.DataFrame] = None
+    """
+    Простий «все-в-одному» індекс: BM25 + dense + (optional) CE.
+    Будується з DataFrame (кожний рядок = препарат). Поля секцій беруться зі стовпців.
+    """
+
+    # Типові імена секцій (українською)
+    DEFAULT_SECTIONS = [
+        "Показання",
+        "Протипоказання",
+        "Побічні реакції",
+        "Спосіб застосування та дози",
+        "Взаємодія з іншими лікарськими засобами та інші види взаємодій",
+        "Фармакологічні властивості",
+        "Склад",
+    ]
+
+    NAME_COL = "Назва препарату"
+
+    def __init__(self) -> None:
+        # Дані
         self.passages: List[str] = []
-        self.meta: List[Dict] = []
+        self.meta: List[Dict[str, Any]] = []
 
         # BM25
-        self.bm25: Optional[BM25Okapi] = None
+        self._bm25: Optional[BM25Okapi] = None
+        self._bm25_tokens: Optional[List[List[str]]] = None
 
-        # FAISS/bi-encoder
-        self.encoder: Optional[SentenceTransformer] = None
-        self.faiss_index = None
-        self.vecs: Optional[np.ndarray] = None
+        # Dense
+        self._encoder_name: Optional[str] = None
+        self._encoder: Optional[SentenceTransformer] = None  # type: ignore
+        self._emb: Optional[np.ndarray] = None  # (N, D), l2-normalized
 
-        # CrossEncoder
-        self.ce: Optional[CrossEncoder] = None
-        self.ce_top = 100
-        self.ce_min = 0.15
-        self.ce_w = 0.8
+        # CE
+        self._ce_name: Optional[str] = None
+        self._ce: Optional[CrossEncoder] = None  # type: ignore
 
-        # Components
-        self.medical_chunker = MedicalChunker(
-            tokenizer_model="sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
-        )
-        self.safety_filter = MedicalSafetyFilter() if MedicalSafetyFilter else None
+    # ------------------------------------------------------------------ build
 
-    # ---- build ----
     def build_from_dataframe(
         self,
-        df: pd.DataFrame,
-        encoder_model: Optional[str] = None,
-        prefer_indications: bool = True,
+        df: "pd.DataFrame",
+        encoder_model: str = "intfloat/multilingual-e5-base",
         medical_chunking: bool = True,
-        max_chunk_tokens: int = 256,
-        show_batches: bool = True,
-    ) -> None:
+        max_chunk_tokens: int = 128,
+        sections: Optional[List[str]] = None,
+    ) -> "EnhancedMedicalAssistant":
         """
-        Build corpus of passages from key fields and construct BM25 (+ FAISS if available).
-        Uses MedicalChunker for structured, medical-aware chunking.
+        Створює корпус пасажів із колонок секцій та будує індекси BM25 + dense.
         """
-        self.df = df.copy()
-        self.passages = []
-        self.meta = []
+        assert pd is not None, "pandas is required to build from dataframe"
+        assert SentenceTransformer is not None, "sentence-transformers is required"
 
-        fields = [
-            # !!! НЕ включаємо "Назва препарату" в текст для індексації (лише в meta)
-            "Показання",
-            "Протипоказання",
-            "Спосіб застосування та дози",
-            "Склад",
-            "Фармакотерапевтична група",
-            "Фармакологічні властивості",
-        ]
-        fields = [f for f in fields if f in self.df.columns]
+        secs = sections or list(self.DEFAULT_SECTIONS)
+        name_col = self.NAME_COL if self.NAME_COL in df.columns else df.columns[0]
 
-        print(f"[INFO] Building index with {'MEDICAL' if medical_chunking else 'STANDARD'} chunking...")
+        passages: List[str] = []
+        meta: List[Dict[str, Any]] = []
 
-        for i, row in tqdm(self.df.iterrows(), total=len(self.df), desc="Processing drugs"):
-            name = clean_text(row.get("Назва препарату", ""))
+        for _, row in df.iterrows():
+            name = str(row.get(name_col, "")).strip()
+            for sec in secs:
+                txt = str(row.get(sec, "") or "").strip()
+                if not txt:
+                    continue
+                if medical_chunking:
+                    chunks = _split_by_tokens(txt, max_chunk_tokens)
+                    for ch in chunks:
+                        passages.append(ch)
+                        meta.append(
+                            {
+                                "name": name,
+                                "section": sec,
+                                "indications": str(row.get("Показання", "") or ""),
+                                "contraindications": str(row.get("Протипоказання", "") or ""),
+                            }
+                        )
+                else:
+                    passages.append(txt)
+                    meta.append(
+                        {
+                            "name": name,
+                            "section": sec,
+                            "indications": str(row.get("Показання", "") or ""),
+                            "contraindications": str(row.get("Протипоказання", "") or ""),
+                        }
+                    )
 
-            # Structured medical text with field labels (helps BM25/CE)
-            blocks: List[str] = []
-            for field in fields:
-                content = clean_text(row.get(field, ""))
-                if content:
-                    blocks.append(f"{field}: {content}")
+        self.passages = passages
+        self.meta = meta
 
-            full_text = " [SEP] ".join(blocks)
+        print(f"[INFO] Built passages: {len(self.passages):,}")
 
-            # Chunking
-            if medical_chunking:
-                chunks = medical_chunk_text(full_text, self.medical_chunker, max_tokens=max_chunk_tokens)
-            else:
-                chunks = self._old_chunk_text(full_text, chunk_size=1200, overlap=200)
+        # --- BM25
+        tok_corpus = [_tokenize_ua(p) for p in self.passages]
+        self._bm25_tokens = tok_corpus
+        self._bm25 = BM25Okapi(tok_corpus)
+        print(f"[INFO] BM25 ready: {len(tok_corpus):,} chunks")
 
-            indications = row.get("Показання", "") or ""
-            contraindications = row.get("Протипоказання", "") or ""
+        # --- Dense
+        self._encoder_name = encoder_model
+        self._encoder = SentenceTransformer(encoder_model)
+        emb = self._encoder.encode(self.passages, batch_size=128, show_progress_bar=True, normalize_embeddings=True)
+        self._emb = emb.astype(np.float32)
+        print(f"[INFO] Encoder loaded: {encoder_model} | dim={self._emb.shape[1]}")
 
-            for ch in chunks:
-                section = ch.split(":", 1)[0].strip() if ":" in ch else "Текст"
-                self.passages.append(ch)
-                self.meta.append({
-                    "doc_id": int(i),
-                    "name": name,
-                    "section": section,
-                    "indications": indications,
-                    "contraindications": contraindications,
-                })
+        return self
 
-        # BM25
-        tokenized = [_bm25_tokens(p) for p in self.passages]
-        self.bm25 = BM25Okapi(tokenized)
+    # ------------------------------------------------------------------ CE
 
-        # FAISS (optional)
-        if encoder_model and FAISS_OK:
-            self._build_faiss_index(encoder_model, show_batches=show_batches)
-        else:
-            print(f"[INFO] Passages: {len(self.passages)} | FAISS: OFF")
+    def _ensure_ce(self, model_name: str) -> None:
+        if CrossEncoder is None:
+            raise RuntimeError("CrossEncoder is not available. Install sentence-transformers.")
+        if self._ce is None or self._ce_name != model_name:
+            print(f"[INFO] Loading CrossEncoder: {model_name}")
+            self._ce = CrossEncoder(model_name)
+            self._ce_name = model_name
 
-    def _build_faiss_index(self, encoder_model: str, show_batches: bool = True) -> None:
-        """Build FAISS index with batched encoding."""
-        self.encoder = SentenceTransformer(encoder_model)
-        vecs = []
-        bs = 128
-        total = len(self.passages)
-        batches = math.ceil(total / bs)
-        for bi in tqdm(range(batches), total=batches, desc="Encoding", leave=False):
-            s = bi * bs
-            e = min(total, s + bs)
-            emb = self.encoder.encode(
-                self.passages[s:e],
-                show_progress_bar=False,
-                normalize_embeddings=True
-            )
-            vecs.append(np.asarray(emb, dtype="float32"))
-        self.vecs = np.vstack(vecs) if vecs else None
-        if self.vecs is None:
-            print("[WARN] No vectors encoded; FAISS disabled.")
-            return
-        d = self.vecs.shape[1]
-        self.faiss_index = faiss.IndexFlatIP(d)
-        self.faiss_index.add(self.vecs)
-        print(f"[INFO] Passages: {len(self.passages)} | FAISS dim={d}")
+    # ------------------------------------------------------------------ search
 
-    def _old_chunk_text(self, txt: str, chunk_size: int = 1200, overlap: int = 200) -> List[str]:
-        tokens = txt.split(" ")
-        chunks = []
-        i = 0
-        while i < len(tokens):
-            piece = " ".join(tokens[i:i+chunk_size])
-            if piece.strip():
-                chunks.append(piece.strip())
-            i += max(1, chunk_size - overlap)
-        return chunks
+    def _bm25_topn(self, query: str, n: int) -> List[Tuple[int, float]]:
+        assert self._bm25 is not None and self._bm25_tokens is not None
+        q_tokens = _tokenize_ua(query)
+        scores = self._bm25.get_scores(q_tokens)
+        # top-n
+        idx = np.argpartition(scores, -n)[-n:]
+        pairs = sorted(((int(i), float(scores[i])) for i in idx), key=lambda x: x[1], reverse=True)
+        return pairs
 
-    def enable_crossencoder(self, model_name: str, ce_top: int = 100, ce_min: float = 0.15, ce_weight: float = 0.8) -> None:
-        self.ce = CrossEncoder(model_name, max_length=512)
-        self.ce_top = ce_top
-        self.ce_min = ce_min
-        self.ce_w = ce_weight
-        print(f"[INFO] CrossEncoder active: {model_name} (top={ce_top})")
+    def _dense_topn(self, query: str, n: int) -> List[Tuple[int, float]]:
+        assert self._encoder is not None and self._emb is not None
+        q = self._encoder.encode([query], normalize_embeddings=True)[0].astype(np.float32)
+        sims = (self._emb @ q)  # cosine (бо обидві нормалізовані)
+        idx = np.argpartition(sims, -n)[-n:]
+        pairs = sorted(((int(i), float(sims[i])) for i in idx), key=lambda x: x[1], reverse=True)
+        return pairs
 
-    # ---- search ----
-    def search(self, query: str, cfg: SearchConfig, user_profile: Optional[UserProfile] = None) -> List[Dict]:
-        """Enhanced search with optional medical safety filtering."""
-        assert self.bm25 is not None
-
-        # BM25
-        scores_bm = self.bm25.get_scores(_bm25_tokens(query))
-        bm_idx = np.argsort(-scores_bm)[:cfg.top_k]
-        bm = [(int(i), float(scores_bm[i])) for i in bm_idx]
-
-        # FAISS
-        fa: List[Tuple[int, float]] = []
-        if self.encoder is not None and self.faiss_index is not None:
-            vec = self.encoder.encode([query], normalize_embeddings=True).astype("float32")
-            D, I = self.faiss_index.search(vec, cfg.top_k)
-            fa = [(int(i), float(D[0, j])) for j, i in enumerate(I[0])]
-
-        # RRF fusion (k = cfg.rrf_alpha)
-        candidates = self._rrf_fusion(bm, fa, cfg)
-
-        # If no CE, use normalized RRF + optional indications boost
-        if self.ce is None and candidates:
-            rr_vals = [c["rrf"] for c in candidates]
-            rr_min, rr_max = min(rr_vals), max(rr_vals)
-            def nrm(v: float) -> float:
-                return (v - rr_min) / (rr_max - rr_min + 1e-9)
-            for c in candidates:
-                score = nrm(c["rrf"])
-                if cfg.prefer_indications and c.get("section") == "Показання":
-                    score += cfg.indications_boost
-                c["score"] = score
-            candidates = sorted(candidates, key=lambda x: -x["score"])
-
-        # CrossEncoder reranking (with normalization + indications boost)
-        if self.ce is not None and len(candidates) > 0:
-            candidates = self._crossencoder_rerank(query, candidates, cfg)
-
-        # Safety filtering (optional)
-        if cfg.enable_safety_filter and user_profile and self.safety_filter:
-            candidates = self._apply_safety_filter(candidates, user_profile)
-
-        # Group by drug
-        return self._group_and_format_results(candidates[:cfg.show])
-
-    def _rrf_fusion(self, bm_results: List[Tuple[int, float]], fa_results: List[Tuple[int, float]], cfg: SearchConfig) -> List[Dict]:
-        """RRF fusion of BM25 and FAISS candidate lists."""
-        r_bm = {pid: r+1 for r, (pid, _) in enumerate(bm_results)}
-        r_fa = {pid: r+1 for r, (pid, _) in enumerate(fa_results)}
-        all_ids = set(r_bm) | set(r_fa)
-
-        k = float(cfg.rrf_alpha)
-        fuse: Dict[int, float] = {}
-        for pid in all_ids:
-            s = 0.0
-            if pid in r_bm: s += 1.0 / (k + r_bm[pid])
-            if pid in r_fa: s += 1.0 / (k + r_fa[pid])
-            fuse[pid] = s
-
-        fused = sorted(fuse.items(), key=lambda x: -x[1])[:cfg.top_k]
-        out: List[Dict] = []
-        for pid, sc in fused:
-            meta = self.meta[pid]
-            out.append({
-                "pid": pid,
-                "text": self.passages[pid],
-                "rrf": float(sc),
-                "doc_id": meta["doc_id"],
-                "name": meta["name"],
-                "section": meta.get("section", "Текст"),
-                "indications": meta.get("indications", ""),
-                "contraindications": meta.get("contraindications", ""),
-            })
+    def _apply_gate(self, items: List[Tuple[int, float]], cfg: SearchConfig) -> List[Tuple[int, float]]:
+        if cfg.gate_mode == "none" or not cfg.gate_sections:
+            return items
+        allowed = set(cfg.gate_sections)
+        out: List[Tuple[int, float]] = []
+        if cfg.gate_mode == "require":
+            for pid, sc in items:
+                if self.meta[pid].get("section") in allowed:
+                    out.append((pid, sc))
+            return out
+        # prefer
+        for pid, sc in items:
+            if self.meta[pid].get("section") in allowed:
+                sc *= float(cfg.prefer_boost)
+            out.append((pid, sc))
         return out
 
-    def _crossencoder_rerank(self, query: str, candidates: List[Dict], cfg: SearchConfig) -> List[Dict]:
-        """CrossEncoder reranking with batch normalization and small section-based boost."""
-        topN = min(self.ce_top, len(candidates))
-        pairs = [(query, candidates[i]["text"]) for i in range(topN)]
-        ce_scores = self.ce.predict(pairs).tolist()  # type: ignore
+    def _minmax_norm(self, arr: np.ndarray) -> np.ndarray:
+        if arr.size == 0:
+            return arr
+        mn, mx = float(np.min(arr)), float(np.max(arr))
+        if not math.isfinite(mn) or not math.isfinite(mx) or mx <= mn:
+            return np.zeros_like(arr)
+        return (arr - mn) / (mx - mn)
 
-        for i, s in enumerate(ce_scores):
-            candidates[i]["ce"] = float(s)
+    def search(self, query: str, cfg: Optional[SearchConfig] = None) -> List[Dict[str, Any]]:
+        """
+        Повертає список "груп" (по назві препарату) з best_score і деталями хітів.
+        """
+        cfg = cfg or SearchConfig()
 
-        # Normalize RRF and CE to comparable 0..1 ranges
-        rrf_vals = [c["rrf"] for c in candidates]
-        rr_min, rr_max = min(rrf_vals), max(rrf_vals)
-        ce_vals = [c.get("ce", 0.0) for c in candidates[:topN]]
-        ce_raw_min, ce_raw_max = (min(ce_vals) if ce_vals else 0.0), (max(ce_vals) if ce_vals else 1.0)
+        if not self.passages:
+            return []
 
-        def nrm(v: float, a: float, b: float) -> float:
-            return (v - a) / (b - a + 1e-9)
+        # Кандидати від кожного ретрівера
+        n_bm25 = max(cfg.top_k * 10, 200)
+        n_dense = max(cfg.top_k * 10, 200)
 
-        for idx, c in enumerate(candidates):
-            rrf_norm = nrm(c["rrf"], rr_min, rr_max)
-            if idx < topN:
-                ce_adj = max(0.0, c.get("ce", 0.0) - cfg.ce_min)
-                ce_norm = nrm(ce_adj, max(0.0, ce_raw_min - cfg.ce_min), max(1e-9, ce_raw_max - cfg.ce_min))
-                score = (1.0 - cfg.ce_weight) * rrf_norm + cfg.ce_weight * ce_norm
-            else:
-                score = rrf_norm
-            if cfg.prefer_indications and c.get("section") == "Показання":
-                score += cfg.indications_boost
-            c["score"] = float(score)
+        bm25_pairs = self._bm25_topn(query, min(n_bm25, len(self.passages)))
+        bm25_pairs = self._apply_gate(bm25_pairs, cfg)
 
-        return sorted(candidates, key=lambda x: -x["score"])
+        dense_pairs = self._dense_topn(query, min(n_dense, len(self.passages)))
+        dense_pairs = self._apply_gate(dense_pairs, cfg)
 
-    def _apply_safety_filter(self, candidates: List[Dict], user_profile: UserProfile) -> List[Dict]:
-        """Apply medical safety filtering; safest first (lower risk_score), then higher model score."""
-        if not self.safety_filter:
-            return candidates
-        for c in candidates:
-            contraindications = c.get("contraindications", "") or ""
-            report = self.safety_filter.assess_drug_safety(contraindications, user_profile)  # type: ignore
-            c["safety_report"] = report
-            c["risk_level"] = report.get("risk_level", "LOW")
-            c["safe_to_use"] = report.get("safe_to_use", True)
-            c["risk_score"] = report.get("risk_score", 0.0)
-        return sorted(candidates, key=lambda x: (x.get("risk_score", 0.0), -x.get("score", 0.0)))
+        if not bm25_pairs and not dense_pairs:
+            return []
 
-    def _group_and_format_results(self, candidates: List[Dict]) -> List[Dict]:
-        """Group passages by drug and roll-up best score and safety signals."""
-        by_drug: Dict[str, Dict] = {}
-        for c in candidates:
-            name = c["name"]
-            g = by_drug.get(name)
-            if not g:
-                g = {
-                    "drug_name": name,
-                    "doc_id": c["doc_id"],
-                    "best_score": float(c.get("score", c.get("rrf", 0.0))),
-                    "passages": [],
-                    "indications": c.get("indications", ""),
-                    "contraindications": c.get("contraindications", ""),
-                    "safety_report": c.get("safety_report", {}),
-                    "risk_level": c.get("risk_level", "UNKNOWN"),
-                    "safe_to_use": c.get("safe_to_use", True),
-                    "risk_score": c.get("risk_score", 0.0),
+        # Ранги для RRF
+        r_bm = {pid: r + 1 for r, (pid, _) in enumerate(sorted(bm25_pairs, key=lambda x: x[1], reverse=True))}
+        r_de = {pid: r + 1 for r, (pid, _) in enumerate(sorted(dense_pairs, key=lambda x: x[1], reverse=True))}
+
+        fused = _weighted_rrf(
+            r_bm, r_de, alpha=float(cfg.rrf_alpha), w_bm25=float(cfg.w_bm25), w_dense=float(cfg.w_dense)
+        )
+
+        # ТОП перед CE
+        fused = fused[: max(cfg.top_k * 10, 300)]
+
+        # CE rerank (опційно)
+        ce_scores: Dict[int, float] = {}
+        if cfg.ce_model and cfg.ce_top > 0:
+            self._ensure_ce(cfg.ce_model)
+            ce_top = min(cfg.ce_top, len(fused))
+            cand_ids = [pid for pid, _ in fused[:ce_top]]
+            pairs = [(query, self.passages[pid]) for pid in cand_ids]
+            scores = np.asarray(self._ce.predict(pairs), dtype=np.float32)  # type: ignore
+            # Нормалізуємо і комбінуємо з RRF (також нормалізуємо)
+            fused_scores = np.asarray([s for _, s in fused[:ce_top]], dtype=np.float32)
+            ce_n = self._minmax_norm(scores)
+            fr_n = self._minmax_norm(fused_scores)
+            final = (1.0 - float(cfg.ce_weight)) * fr_n + float(cfg.ce_weight) * ce_n
+            for pid, sc in zip(cand_ids, final.tolist()):
+                ce_scores[pid] = float(sc)
+
+        # Формуємо фінальний список пасажів з метаданими
+        results: List[Dict[str, Any]] = []
+        for pid, rrf_sc in fused:
+            meta = self.meta[pid]
+            sec = meta.get("section", "")
+            sc = float(ce_scores.get(pid, rrf_sc))  # якщо CE переоцінював — беремо комбінований
+            if cfg.indications_boost and sec == "Показання":
+                sc *= (1.0 + float(cfg.indications_boost))
+            results.append(
+                {
+                    "pid": pid,
+                    "score": sc,
+                    "name": meta.get("name", ""),
+                    "text": self.passages[pid],
+                    "section": sec,
+                    "rrf": float(rrf_sc),
                 }
-                by_drug[name] = g
+            )
+
+        # Агрегуємо по препарату (name)
+        groups: Dict[str, Dict[str, Any]] = {}
+        for item in results:
+            nm = item["name"]
+            if nm not in groups:
+                groups[nm] = {
+                    "name": nm,
+                    "best_score": item["score"],
+                    "best_section": item["section"],
+                    "items": [item],
+                }
             else:
-                g["best_score"] = max(g["best_score"], float(c.get("score", c.get("rrf", 0.0))))
-                if "risk_score" in c and c["risk_score"] > g.get("risk_score", 0.0):
-                    g["risk_score"] = c["risk_score"]
-                    g["safety_report"] = c.get("safety_report", g.get("safety_report", {}))
-                    g["risk_level"] = c.get("risk_level", g.get("risk_level", "UNKNOWN"))
-                    g["safe_to_use"] = c.get("safe_to_use", g.get("safe_to_use", True))
-            g["passages"].append({
-                "text": c["text"],
-                "section": c.get("section", "Текст"),
-                "score": float(c.get("score", c.get("rrf", 0.0))),
-            })
+                groups[nm]["items"].append(item)
+                if item["score"] > groups[nm]["best_score"]:
+                    groups[nm]["best_score"] = item["score"]
+                    groups[nm]["best_section"] = item["section"]
 
-        groups = list(by_drug.values())
-        # final sorting: safest first by risk_score, then by best_score desc
-        groups.sort(key=lambda x: (x.get("risk_score", 0.0), -x.get("best_score", 0.0)))
-        return groups
-
-# Backward-compatible alias
-AdvancedMedicalSearchEngine = EnhancedMedicalAssistant
-__all__ = ["EnhancedMedicalAssistant", "AdvancedMedicalSearchEngine", "SearchConfig", "UserProfile"]
-
-# ---- smoke test ----
-if __name__ == "__main__":
-    print("=== ENHANCED MEDICAL ASSISTANT ===")
-    print("Medical chunking + RRF(k) + (opt.) FAISS + (opt.) CE + (opt.) safety ready.")
+        ranked_groups = sorted(groups.values(), key=lambda g: g["best_score"], reverse=True)
+        return ranked_groups[: cfg.top_k]

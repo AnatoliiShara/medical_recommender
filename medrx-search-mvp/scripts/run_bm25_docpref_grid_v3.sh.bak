@@ -1,0 +1,58 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+OUTROOT=${OUTROOT:-runs/bm25_docpref_v3_$(date +%Y%m%d_%H%M%S)}
+PARQUET=${PARQUET:-artifacts_backup/clean_medical.parquet}
+SPLITS=${SPLITS:-"queries_medrx_ua.enhanced queries_autogen_ua.enhanced"}
+K_VALUES=${K_VALUES:-"600"}
+MODE=${MODE:-fast}         # fast=bm25 only; hybrid=BM25+e5-small; ce=BM25+e5-small+CE
+ALPHA=${ALPHA:-60}         # RRF alpha
+KS=${KS:-"3 5 10"}         # метрики @k
+
+BASE_CMD="python -m eval.evaluate_bench"
+
+echo "[INFO] OUTROOT=$OUTROOT"
+echo "[INFO] PARQUET=$PARQUET"
+echo "[INFO] MODE=$MODE"
+echo "[INFO] BASE_CMD=$BASE_CMD"
+
+for K in $K_VALUES; do
+  for S in $SPLITS; do
+    OUTDIR="$OUTROOT/k$K/$S"
+    mkdir -p "$OUTDIR"
+    Q="data/eval/${S}.jsonl"
+
+    # Конфіг за режимами
+    case "$MODE" in
+      fast)
+        ENC_FLAG="--encoder_model none"
+        CE_FLAGS="--reranker_model none --rerank_top 0"
+        ;;
+      hybrid)
+        ENC_FLAG="--encoder_model intfloat/multilingual-e5-small"
+        CE_FLAGS="--reranker_model none --rerank_top 0"
+        ;;
+      ce)
+        ENC_FLAG="--encoder_model intfloat/multilingual-e5-small"
+        CE_FLAGS="--reranker_model BAAI/bge-reranker-v2-m3 --rerank_top ${RERANK_TOP:-20} --rerank_batch ${RERANK_BATCH:-8}"
+        ;;
+      *)
+        echo "[ERR] Unknown MODE=$MODE"; exit 2;;
+    esac
+
+    echo "[RUN] split=$S k=$K -> $OUTDIR"
+    set -x
+    $BASE_CMD \
+      --queries "$Q" \
+      --dataset "$PARQUET" \
+      --top_k "$K" \
+      --prefer_indications \
+      $ENC_FLAG $CE_FLAGS \
+      --alpha "$ALPHA" \
+      --ks $KS \
+      --out_json "$OUTDIR/preds.json" \
+      --out_csv "$OUTDIR/preds.csv" \
+      | tee "$OUTDIR/stdout.log"
+    set +x
+  done
+done
