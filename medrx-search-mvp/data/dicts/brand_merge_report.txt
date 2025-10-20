@@ -1,0 +1,3 @@
+Base rows: 6709
+New rows (non-empty target): 6438
+Added: 0 | Kept: 6438 | Conflicts: 0
