@@ -13,77 +13,16 @@ import pandas as pd
 from rank_bm25 import BM25Okapi
 from sentence_transformers import CrossEncoder, SentenceTransformer
 
-# ------------------------------- Local fusion utils -------------------------------
+# optional faiss (dense retrieval)
+try:
+    import faiss  # type: ignore
+    _FAISS_OK = True
+except Exception:
+    _FAISS_OK = False
 
-def _softmax(x: np.ndarray, T: float = 1.0) -> np.ndarray:
-    if x.size == 0:
-        return x
-    z = (x - np.max(x)) / max(T, 1e-8)
-    e = np.exp(z)
-    s = e.sum()
-    return e / s if s > 0 else np.zeros_like(x)
+# локальні утиліти
+from src.search.fusion import rrf, normalize_scores
 
-def normalize_scores(scores: Dict[int, float], mode: str = "none", temperature: float = 1.0) -> Dict[int, float]:
-    if not scores:
-        return {}
-    idx = np.array(list(scores.keys()))
-    val = np.array([scores[i] for i in idx], dtype=float)
-    if mode == "none":
-        norm = val
-    elif mode == "minmax":
-        lo, hi = float(val.min()), float(val.max())
-        if hi > lo:
-            norm = (val - lo) / (hi - lo)
-        else:
-            norm = np.zeros_like(val)
-    elif mode == "softmax":
-        norm = _softmax(val, T=max(temperature, 1e-8))
-    else:
-        norm = val
-    return {int(i): float(v) for i, v in zip(idx, norm)}
-
-def weighted_fusion(sources: List[Dict[int, float]], weights: List[float]) -> Dict[int, float]:
-    out: Dict[int, float] = {}
-    for src, w in zip(sources, weights):
-        if not src or w == 0:
-            continue
-        for doc, sc in src.items():
-            out[doc] = out.get(doc, 0.0) + w * sc
-    return out
-
-def rrf_fuse(rank_lists: List[List[int]], k: int = 60) -> Dict[int, float]:
-    # Reciprocal Rank Fusion
-    scores: Dict[int, float] = {}
-    for ranks in rank_lists:
-        for r, doc in enumerate(ranks, start=1):
-            scores[doc] = scores.get(doc, 0.0) + 1.0 / (k + r)
-    return scores
-
-def as_ranked_list(rrf_out: Any) -> List[int]:
-    """
-    Приводить будь-який вихід до списку doc_id у порядку зменшення балів.
-    Підтримує:
-      - dict {doc_id: score}
-      - list[int] (вже відсортований)
-      - list[tuple(id, score)]
-      - numpy масиви
-    """
-    if rrf_out is None:
-        return []
-    if isinstance(rrf_out, dict):
-        return [int(doc) for doc, _ in sorted(rrf_out.items(), key=lambda kv: kv[1], reverse=True)]
-    if isinstance(rrf_out, (list, tuple, np.ndarray)):
-        seq = list(rrf_out)
-        if not seq:
-            return []
-        first = seq[0]
-        if isinstance(first, (tuple, list)) and len(first) >= 2:
-            return [int(doc) for doc, _ in sorted(seq, key=lambda kv: kv[1], reverse=True)]
-        return [int(x) for x in seq]
-    try:
-        return [int(x) for x in rrf_out]  # type: ignore
-    except Exception:
-        return []
 
 # ------------------------------- IO / COLS -------------------------------
 
@@ -114,6 +53,9 @@ def read_parquet_dataset(path: str) -> pd.DataFrame:
     name_cols = [c for c in NAME_COL_CANDIDATES if c in df.columns]
     if name_cols:
         print(f"[INFO] name columns detected: {name_cols}")
+    present = [c for c in DEFAULT_TEXT_COLUMNS if c in df.columns]
+    if present:
+        print(f"[INFO] text columns used for BM25/CE: {present}")
     return df
 
 
@@ -133,137 +75,127 @@ def get_name_series(df: pd.DataFrame) -> pd.Series:
     # fallback
     return df[DEFAULT_TEXT_COLUMNS[0]].fillna("").astype(str)
 
+
 # ------------------------------- Tokenize -------------------------------
 
 WORD_RE = re.compile(r"[a-zа-яіїєґ0-9]+", re.IGNORECASE)
 
+
 def tokenize_uk(text: str) -> List[str]:
     return WORD_RE.findall((text or "").lower())
 
-# ------------------------------- Heuristics (defaults) -------------------------------
-# ТРИГЕРИ ЗАПИТУ
+
+# ------------------------------- Dict utils -------------------------------
+
+def _clean_line(s: str) -> str:
+    return s.strip().strip('"').strip("'").lower()
+
+
+def load_lines(path: Optional[str]) -> List[str]:
+    if not path or not os.path.exists(path):
+        return []
+    try:
+        out = []
+        with open(path, "r", encoding="utf-8") as f:
+            for line in f:
+                s = _clean_line(line)
+                if not s or s.startswith("#"):
+                    continue
+                out.append(s)
+        return out
+    except Exception:
+        return []
+
+
+def any_term_in(text: str, terms: List[str]) -> bool:
+    if not terms:
+        return False
+    t = (text or "").lower()
+    return any(term in t for term in terms)
+
+
+# ------------------------------- Heuristics: SPECIAL (oral thrush) -------------------------------
 ORAL_THRUSH_TRIGGER = re.compile(
     r"(кандидоз(?!\s+шкiри)|кандидозної\s+інфекції\s+ротоглотк|молочниця|thrush|oropharyn(g|ge)al|ротоглотк(и|и))",
     re.IGNORECASE,
 )
 
-ACID_QUERY_TRIGGER = re.compile(
-    r"(гастрит|підвищен(а|ої)\s+кислотн|рефлюкс|печія|виразк(а|и))",
-    re.IGNORECASE,
-)
-
-# Базові терміни (fallback), замінюємо словниками, якщо вони є
 ANTIFUNGAL_TERMS = re.compile(
-    r"(клотримазол|ністатин|натаміцин|міконазол|кетоконазол|флуконазол|ітраконазол|вориконазол|амфотерицин|деквалінію|ніфурател|пімафуцин)",
+    r"(клотримазол|ністатин|натаміцин|міконазол|кетоконазол|флуконазол|ітраконазол|вориконазол|амфотерицин|декваліній|dequalinium|ніфурател|пімафуцин)",
     re.IGNORECASE,
 )
 
-# Лише локальні/оромукозні форми (без системних таб/капсул) — fallback
 ORAL_ALLOWED_FORM = re.compile(
     r"(спрей(\s+для\s+ротової\s+порожнини)?|для\s+ротової\s+порожнини|ополіскувач|полоскання|"
     r"льодяник(и)?|пастилк(а|и)|таблетк(а|и)\s+для\s+розсмоктування|"
-    r"розчин\s+для\s+ротової\s+порожнини|аерозоль\s+для\s+ротової\s+порожнини|"
-    r"оральн(ий|а)\s+гель|оральна\s+паста|суспензія\s+для\s+ротової\s+порожнини)",
+    r"розчин\s+для\s+ротової\s+порожнини|аерозоль\s+для\s+ротової\s+порожнини|оральн(ий|а)\s+гель|оральна\s+паста|"
+    r"суспензія\s+для\s+ротової\s+порожнини)",
     re.IGNORECASE,
 )
 
-# СИСТЕМНІ ПЕРОРАЛЬНІ ФОРМИ (для довідки/відсікання в bias)
 ORAL_SYSTEMIC_FORM = re.compile(
-    r"(таблетк(а|и)\b(?!\s+для\s+розсмоктування)|капсул(а|и)|суспензія|сироп|пероральн|оральн(?!\s+порожнини)|"
+    r"(таблетк(а|и)\b(?!\s+для\s+розсмоктування)|капсул(а|и)|суспензія\b(?!\s+для\s+ротової)|сироп\b|пероральн(ий|а)\b(?!\s+порожнини)|"
     r"розчин\s+для\s+інфузій|інфузійн(ий|а))",
     re.IGNORECASE,
 )
 
-# Конкуренти (антисептики для горла) — fallback
 THROAT_ANTISEPTIC = re.compile(
-    r"(бензидамін|хлоргексидин|цетилпіридин(і|и)й|амілметакрезол|2,4-ди(х|хл)лорбензилов(ий|ого)\s+спирт|лор|антисептик)",
+    r"(бензидамін|хлоргексидин|цетилпіридин(і|и)й|амілметакрезол|2,4-ди(х|хл)лорбензилов(ий|ого)\s+спирт|гексаспрей|biclotymol|біклотимол)",
     re.IGNORECASE,
 )
 
-# Дерматологічні форми — fallback
 DERM_BLOCK_FORM = re.compile(
-    r"(мазь|крем(?!\s+для\s+ротової)|шампунь|крем-гель|лосьйон(?!\s+для\s+ротової))",
+    r"(мазь|крем(?!\s+для\s+ротової)|шампунь|крем-гель|лосьйон(?!\s+для\s+ротової)|"
+    r"вагінальн|овул(я|і)|вагінальні\s+супозиторії|свічк(и)?\s+вагінальн(і|а|ий)|"
+    r"крем\s+вагінальний|гель\s+вагінальний|таблетк(а|и)\s+вагінальн(і|а))",
     re.IGNORECASE,
 )
 
-# ACID POS терміни (контроль кислотності)
-ACID_POS_TERMS = re.compile(
-    r"(омепразол|пантопразол|рабепразол|лансопразол|езомепразол|де-нол|сукральфат|антацид|гавіскон|"
-    r"альгінат|альгінова\s+кислота|фамотидин|ранитидин|протонн(ий|і)\s+насос|ppi|h2-блокатор)",
-    re.IGNORECASE,
-)
 
-# ------------------------------- Heuristic logic -------------------------------
+# ------------------------------- Heuristics: GENERIC CLINICAL DICTS -------------------------------
 
-def heuristic_filter_ids(
-    query: str,
-    df: pd.DataFrame,
-    actives_rx: Optional[re.Pattern],
-    allowed_form_rx: Optional[re.Pattern],
-    antiseptic_rx: Optional[re.Pattern],
-) -> Tuple[Optional[set], Optional[str], str]:
-    """
-    Повертає (id_set, tag, mode), де:
-      - id_set: множина id документів, на які слід накласти union/boost;
-      - tag: назва евристики;
-      - mode: "filter" або "boost" (зараз використовується лише як індикатор; у CE робимо UNION).
-    Якщо евристика не тригериться — (None, None, "none").
-    """
-    # ORAL THRUSH — локальна (ротоглотка)
-    if ORAL_THRUSH_TRIGGER.search(query):
-        comp_series = df.get("Склад", pd.Series([""] * len(df))).fillna("").astype(str)
-        form_series = df.get("Лікарська форма", pd.Series([""] * len(df))).fillna("").astype(str)
-        text_series = (
-            df.get("Показання", pd.Series([""] * len(df))).fillna("").astype(str)
-            + " "
-            + comp_series
-            + " "
-            + form_series
-        )
+class ClinicalDicts:
+    """Завантажує data/dicts/clinical/<condition>/{*_trigger,_positive,_penalty}.txt"""
+    def __init__(self, root_dir: str):
+        self.root_dir = root_dir
+        self.conditions: Dict[str, Dict[str, List[str]]] = {}
+        self._load()
 
-        strict, sys_any, soft_oral, throat_antiseptic = set(), set(), set(), set()
+    def _load(self) -> None:
+        if not self.root_dir or not os.path.isdir(self.root_dir):
+            return
+        for cond in sorted(os.listdir(self.root_dir)):
+            cdir = os.path.join(self.root_dir, cond)
+            if not os.path.isdir(cdir):
+                continue
+            entry: Dict[str, List[str]] = {"trigger": [], "positive": [], "penalty": []}
+            for fname in os.listdir(cdir):
+                path = os.path.join(cdir, fname)
+                low = fname.lower()
+                if low.endswith("_trigger.txt"):
+                    entry["trigger"].extend(load_lines(path))
+                elif low.endswith("_positive.txt"):
+                    entry["positive"].extend(load_lines(path))
+                elif low.endswith("_penalty.txt"):
+                    entry["penalty"].extend(load_lines(path))
+            if any(entry.values()):
+                self.conditions[cond] = entry
 
-        ARX = actives_rx or ANTIFUNGAL_TERMS
-        FRX = allowed_form_rx or ORAL_ALLOWED_FORM
-        ANRX = antiseptic_rx or THROAT_ANTISEPTIC
+    def detect(self, query: str) -> List[str]:
+        q = (query or "").lower()
+        matched = []
+        for cond, d in self.conditions.items():
+            trg = d.get("trigger", [])
+            if trg and any_term_in(q, trg):
+                matched.append(cond)
+        return matched
 
-        for i, (comp, form, blob) in enumerate(zip(comp_series, form_series, text_series)):
-            comp = comp or ""
-            form = form or ""
-            blob = blob or ""
+    def positives(self, cond: str) -> List[str]:
+        return self.conditions.get(cond, {}).get("positive", []) or []
 
-            if ARX.search(comp) or ARX.search(blob):
-                if FRX.search(form) or FRX.search(blob):
-                    strict.add(i)
-                if ORAL_SYSTEMIC_FORM.search(form) or ORAL_SYSTEMIC_FORM.search(blob):
-                    sys_any.add(i)
-                soft_oral.add(i)
+    def penalties(self, cond: str) -> List[str]:
+        return self.conditions.get(cond, {}).get("penalty", []) or []
 
-            if ANRX.search(comp) or ANRX.search(blob):
-                throat_antiseptic.add(i)
-
-        # Tagging decisions (режими історичні — фактично ми робимо UNION у CE)
-        if len(strict) >= 3:
-            return strict, "oral_thrush", "filter"
-        if 1 <= len(strict) < 3:
-            return strict, "oral_thrush", "boost"
-        if len(sys_any) >= 1:
-            return sys_any, "oral_thrush_sys", "boost"
-        if len(soft_oral) >= 1:
-            soft_clean = soft_oral.difference(throat_antiseptic)
-            if len(soft_clean) >= 1:
-                return soft_clean, "oral_thrush_soft_clean", "boost"
-            return soft_oral, "oral_thrush_soft", "boost"
-        return None, None, "none"
-
-    # ACID CONTROL — гастрит/кислотність
-    if ACID_QUERY_TRIGGER.search(query):
-        cols = [c for c in ["Показання", "Фармакологічні властивості", "Склад", "Лікарська форма"] if c in df.columns]
-        series = (df[cols].fillna("").astype(str)).agg(" ".join, axis=1) if cols else pd.Series([""] * len(df))
-        keep = {i for i, blob in enumerate(series) if ACID_POS_TERMS.search(blob)}
-        return (keep if keep else None), "gastritis_acid", ("filter" if keep else "none")
-
-    return None, None, "none"
 
 # ------------------------------- Rewrite -------------------------------
 
@@ -285,6 +217,7 @@ def load_aliases_csv(path: Optional[str]) -> Dict[str, str]:
     except Exception:
         return {}
 
+
 def rewrite_query(q: str, aliases: Dict[str, str]) -> Tuple[str, bool]:
     orig = q
     q_low = q.lower()
@@ -300,6 +233,7 @@ def rewrite_query(q: str, aliases: Dict[str, str]) -> Tuple[str, bool]:
             rewritten.append(t)
     new_q = " ".join(rewritten) if changed else q
     return new_q, (new_q != orig)
+
 
 # ------------------------------- BM25 -----------------------------------
 
@@ -321,49 +255,32 @@ class BM25Wrapper:
         idx = idx[np.argsort(scores[idx])[::-1]]
         return [(int(i), float(scores[i])) for i in idx]
 
-# ------------------------------- Dense (FAISS) -----------------------------------
 
-class DenseRetriever:
-    def __init__(self, faiss_index_path: Optional[str], doc_ids_path: Optional[str], embed_model: Optional[str], metric: str = "ip"):
-        self.enabled = False
-        self.index = None
-        self.idmap: Optional[np.ndarray] = None
-        self.encoder: Optional[SentenceTransformer] = None
-        self.metric = metric.lower()
+# ------------------------------- Dense (FAISS) -------------------------------
 
-        if faiss_index_path and os.path.exists(faiss_index_path):
-            try:
-                import faiss  # type: ignore
-                self.faiss = faiss
-                self.index = faiss.read_index(faiss_index_path)
-                # id map
-                if doc_ids_path and os.path.exists(doc_ids_path):
-                    self.idmap = np.load(doc_ids_path, allow_pickle=True)
-                # encoder
-                if embed_model:
-                    self.encoder = SentenceTransformer(embed_model)
-                self.enabled = True
-            except Exception as e:
-                print(f"[WARN] Dense retriever disabled (FAISS init failed): {e}")
+class DenseFaiss:
+    def __init__(self, faiss_index_path: str, index_dir: str, embed_model_name: str):
+        self.index = faiss.read_index(faiss_index_path)
+        self.doc_ids = np.load(os.path.join(index_dir, "doc_ids.npy"), allow_pickle=True)
+        self.encoder = SentenceTransformer(embed_model_name)
+        self._normalize = True  # e5 краще з normalize_embeddings=True
+
+    def encode_query(self, q: str) -> np.ndarray:
+        v = self.encoder.encode([q], normalize_embeddings=self._normalize)
+        return v.astype("float32")
 
     def search(self, query: str, top_k: int) -> List[Tuple[int, float]]:
-        if not self.enabled or not self.encoder or self.index is None:
-            return []
-        vec = self.encoder.encode([query], normalize_embeddings=True)
-        D, I = self.index.search(np.array(vec).astype(np.float32), min(top_k, self.index.ntotal))
-        dist = D[0]
-        ids = I[0]
-        out: List[Tuple[int, float]] = []
-        for idx, d in zip(ids, dist):
-            if idx < 0:
+        qv = self.encode_query(query)
+        D, I = self.index.search(qv, min(top_k, len(self.doc_ids)))
+        idxs = I[0].tolist()
+        dists = D[0].tolist()
+        out = []
+        for i, s in zip(idxs, dists):
+            if i < 0:
                 continue
-            # metric handling: for IP — більший краще; для L2 — менший краще (інвертуємо знак)
-            score = float(d if self.metric == "ip" else -d)
-            doc_id = int(self.idmap[idx]) if self.idmap is not None else int(idx)
-            out.append((doc_id, score))
-        # Вже у порядку від кращого до гіршого завдяки FAISS, але на всяк — пересортуємо.
-        out.sort(key=lambda x: x[1], reverse=True)
+            out.append((int(i), float(s)))
         return out
+
 
 # ------------------------------- CE Rerank -------------------------------
 
@@ -374,56 +291,50 @@ def ce_rerank(ce: CrossEncoder, query: str, docs: List[str], batch: int = 8) -> 
     scores = ce.predict(pairs, batch_size=batch, show_progress_bar=False)
     return scores.tolist() if isinstance(scores, np.ndarray) else list(scores)
 
+
 # ------------------------------- Utils -----------------------------------
 
-def _load_lines(path: str) -> List[str]:
+def as_ranked_list(rrf_out: Any) -> List[int]:
+    if rrf_out is None:
+        return []
+    if isinstance(rrf_out, dict):
+        return [int(doc) for doc, _ in sorted(rrf_out.items(), key=lambda kv: kv[1], reverse=True)]
+    if isinstance(rrf_out, (list, tuple, np.ndarray)):
+        seq = list(rrf_out)
+        if not seq:
+            return []
+        first = seq[0]
+        if isinstance(first, (tuple, list)) and len(first) >= 2:
+            return [int(doc) for doc, _ in sorted(seq, key=lambda kv: kv[1], reverse=True)]
+        return [int(x) for x in seq]
     try:
-        with open(path, "r", encoding="utf-8") as f:
-            lines = []
-            for ln in f:
-                s = ln.strip()
-                if not s or s.startswith("#"):
-                    continue
-                lines.append(s)
-            return lines
+        return [int(x) for x in rrf_out]  # type: ignore
     except Exception:
         return []
 
-def compile_regex_from_file(path: str, mode: str = "words") -> Optional[re.Pattern]:
-    """
-    mode:
-      - 'words' -> кожен рядок як слово/фраза, екранізуємо та огортаємо у \b...\b
-      - 'regex' -> рядки трактуються як готові regex-патерни
-    """
-    if not path or not os.path.exists(path):
-        return None
-    lines = _load_lines(path)
-    if not lines:
-        return None
-    if mode == "words":
-        escaped = [r"\b" + re.escape(s) + r"\b" for s in lines]
-        pat = "(?:" + "|".join(escaped) + ")"
-    else:  # regex
-        pat = "(?:" + "|".join(lines) + ")"
-    try:
-        return re.compile(pat, re.IGNORECASE)
-    except Exception:
-        return None
 
 def safe_head(text: str, n: int = 80) -> str:
     s = (text or "").replace("\n", " ")
     return (s[:n] + "…") if len(s) > n else s
+
+
+def dedup_preserve_order(seq: Iterable[int]) -> List[int]:
+    seen, out = set(), []
+    for x in seq:
+        if x not in seen:
+            seen.add(x)
+            out.append(int(x))
+    return out
+
 
 # ------------------------------- Main ------------------------------------
 
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("--dataset", default="data/raw/compendium_all.parquet")
-    p.add_argument("--index_dir", required=True)  # для сумісності з існуючими командами (шлях до ембеддингів/метаданих)
+    p.add_argument("--index_dir", required=True)
     p.add_argument("--faiss_index", default=None)
     p.add_argument("--embed_model", default=None)
-    p.add_argument("--faiss_metric", choices=["ip", "l2"], default="ip")
-
     p.add_argument("--ce_model", default="BAAI/bge-reranker-v2-m3")
     p.add_argument("--ce_batch", type=int, default=4)
 
@@ -438,6 +349,7 @@ def main():
 
     p.add_argument("--fusion", choices=["rrf", "weighted"], default="rrf")
     p.add_argument("--rrf_k", type=int, default=60)
+    p.add_argument("--rrf_alpha", type=float, default=0.0)
     p.add_argument("--w_bm25", type=float, default=0.5)
     p.add_argument("--w_dense", type=float, default=0.5)
 
@@ -451,14 +363,15 @@ def main():
     p.add_argument("--max_doc_chars", type=int, default=1200)
     p.add_argument("--limit_queries", type=int, default=0)
 
-    p.add_argument("--enable_heuristics", action="store_true")  # зарезервовано
+    # Heuristics / dicts
+    p.add_argument("--enable_heuristics", action="store_true")  # історичний прапорець
     p.add_argument("--heuristic_ce_bias", type=float, default=0.35)
 
-    # Словники для ротоглоткового кандидозу
-    p.add_argument("--dict_allowed_forms", default="data/dicts/oral_thrush_allowed_forms.txt")
-    p.add_argument("--dict_actives",       default="data/dicts/oral_thrush_actives.txt")
-    p.add_argument("--dict_antiseptics",   default="data/dicts/throat_antiseptics.txt")
-    p.add_argument("--dict_derm_block",    default="data/dicts/derm_block_forms.txt")
+    # NEW: клінічні словники
+    p.add_argument("--use_clinical_dicts", action="store_true")
+    p.add_argument("--clinical_dicts_dir", default="data/dicts/clinical")
+    p.add_argument("--heuristic_union_cap", type=int, default=96)
+    p.add_argument("--heuristic_bm25_gate_top", type=int, default=64)
 
     args = p.parse_args()
     os.makedirs(args.dump_eval_dir, exist_ok=True)
@@ -467,24 +380,37 @@ def main():
     df = read_parquet_dataset(args.dataset)
     names = get_name_series(df).tolist()
     docs_raw = make_doc_text(df)
+    docs_raw_lower = [d.lower() for d in docs_raw]
 
     # BM25
     print("[INFO] Lexical engine: bm25")
     bm25 = BM25Wrapper(docs_raw)
 
     # Dense
-    doc_ids_path = os.path.join(args.index_dir, "doc_ids.npy")
-    dense = DenseRetriever(args.faiss_index, doc_ids_path, args.embed_model, metric=args.faiss_metric)
-    if dense.enabled:
+    dense = None
+    if _FAISS_OK and args.faiss_index and os.path.exists(args.faiss_index) and args.embed_model:
         try:
-            ntotal = dense.index.ntotal  # type: ignore
-        except Exception:
-            ntotal = len(df)
-        print(f"[INFO] Dense retrieval enabled via FAISS + {args.embed_model} (ntotal={ntotal})")
+            dense = DenseFaiss(args.faiss_index, args.index_dir, args.embed_model)
+            print(f"[INFO] Dense retrieval enabled via FAISS + {args.embed_model} (ntotal={len(dense.doc_ids)})")
+        except Exception as e:
+            print(f"[WARN] Dense retrieval init failed: {e}")
 
     # CE
     ce = CrossEncoder(args.ce_model)
     print(f"[INFO] CrossEncoder loaded: {args.ce_model}; batch={args.ce_batch}")
+
+    # Dicts: загальні та спеціальні
+    dict_dir = os.path.join("data", "dicts")
+    oral_forms_allowed = load_lines(os.path.join(dict_dir, "oral_thrush_allowed_forms.txt"))
+    oral_actives = load_lines(os.path.join(dict_dir, "oral_thrush_actives.txt"))
+    throat_antiseptics_ls = load_lines(os.path.join(dict_dir, "throat_antiseptics.txt"))
+    derm_block_ls = load_lines(os.path.join(dict_dir, "derm_block_forms.txt"))
+    penalty_general = load_lines(os.path.join(dict_dir, "penalty_general.txt"))
+
+    # NEW: клінічні словники
+    clinical = ClinicalDicts(args.clinical_dicts_dir) if args.use_clinical_dicts else None
+    if clinical and clinical.conditions:
+        print(f"[INFO] Clinical dicts loaded: {len(clinical.conditions)} conditions -> {sorted(clinical.conditions.keys())}")
 
     # Queries
     queries = []
@@ -498,21 +424,6 @@ def main():
 
     # Aliases
     aliases = load_aliases_csv(args.rewrite_aliases_csv) if args.use_rewrite else {}
-
-    # Dictionaries -> regex overrides
-    global ORAL_ALLOWED_FORM, THROAT_ANTISEPTIC, DERM_BLOCK_FORM, ANTIFUNGAL_TERMS
-    _allowed_forms_rx = compile_regex_from_file(args.dict_allowed_forms, mode="regex")
-    _actives_rx       = compile_regex_from_file(args.dict_actives,       mode="words")
-    _antiseptics_rx   = compile_regex_from_file(args.dict_antiseptics,   mode="words")
-    _derm_block_rx    = compile_regex_from_file(args.dict_derm_block,    mode="words")
-    if _allowed_forms_rx:
-        ORAL_ALLOWED_FORM = _allowed_forms_rx
-    if _antiseptics_rx:
-        THROAT_ANTISEPTIC = _antiseptics_rx
-    if _derm_block_rx:
-        DERM_BLOCK_FORM = _derm_block_rx
-    # ACTIVES_RX для bias (якщо нема файлу — fallback на ANTIFUNGAL_TERMS)
-    ACTIVES_RX = _actives_rx if _actives_rx else ANTIFUNGAL_TERMS
 
     out_path = os.path.join(args.dump_eval_dir, "predictions.jsonl")
     with open(out_path, "w", encoding="utf-8") as fout:
@@ -528,70 +439,119 @@ def main():
                 q = new_q
 
             print(f"[Q{qi}] {intent}: {q}")
+            q_low = q.lower()
 
-            # евристики -> беремо id для UNION
-            filt_ids, heuristic_tag, heuristic_mode = heuristic_filter_ids(
-                q, df, ACTIVES_RX, ORAL_ALLOWED_FORM, THROAT_ANTISEPTIC
-            )
-
-            # --- BM25 retrieve
+            # --- 1) BM25 retrieve
             bm25_pairs = bm25.search(q, top_k=args.top_k)
             bm25_ids = [i for i, _ in bm25_pairs]
             bm25_scores = {i: s for i, s in bm25_pairs}
 
-            # --- DENSE retrieve (optional)
+            # --- 2) Dense retrieve (optional)
             dense_pairs: List[Tuple[int, float]] = []
-            dense_ids: List[int] = []
             dense_scores: Dict[int, float] = {}
-            if dense.enabled:
-                dense_pairs = dense.search(q, top_k=args.top_k)
-                dense_ids = [i for i, _ in dense_pairs]
-                dense_scores = {i: s for i, s in dense_pairs}
+            dense_ids: List[int] = []
+            if dense is not None:
+                try:
+                    dense_pairs = dense.search(q, top_k=args.top_k)
+                    dense_ids = [i for i, _ in dense_pairs]
+                    dense_scores = {i: s for i, s in dense_pairs}
+                except Exception as e:
+                    print(f"[Q{qi}] WARN: dense retrieval failed: {e}")
 
-            # --- Fusion
-            fused: List[int] = []
-            if args.fusion == "weighted":
-                # normalize & weight
-                bm25_norm = normalize_scores(bm25_scores, mode=args.norm, temperature=args.temperature)
-                dense_norm = normalize_scores(dense_scores, mode=args.norm, temperature=args.temperature) if dense_scores else {}
-                combined = weighted_fusion([bm25_norm, dense_norm], [args.w_bm25, args.w_dense])
-                fused = as_ranked_list(combined)
-                if dense.enabled:
-                    print(f"[Q{qi}] fusion=weighted  w_bm25={args.w_bm25}  w_dense={args.w_dense} k={args.rrf_k}")
-                else:
-                    print(f"[Q{qi}] fusion=weighted (bm25-only) w_bm25={args.w_bm25} k={args.rrf_k}")
+            # --- 3) Fusion
+            if args.fusion == "rrf":
+                bm25_ranks = {doc_id: rank for rank, doc_id in enumerate(bm25_ids, start=1)}
+                sources = {"bm25": bm25_ranks}
+                if dense_ids:
+                    dense_ranks = {doc_id: rank for rank, doc_id in enumerate(dense_ids, start=1)}
+                    sources["dense"] = dense_ranks
+                fused_out = rrf(sources, k=args.rrf_k)
+                fused = as_ranked_list(fused_out)
+                print(f"[Q{qi}] fusion=rrf  k={args.rrf_k}")
             else:
-                # rrf
-                bm25_ranks = list(bm25_scores.keys())  # already ordered by score desc
-                if dense.enabled and dense_ids:
-                    rank_lists = [bm25_ids, dense_ids]
-                    fused_out = rrf_fuse(rank_lists, k=args.rrf_k)
-                    fused = as_ranked_list(fused_out)
-                    print(f"[Q{qi}] fusion=rrf (hybrid) k={args.rrf_k}")
-                else:
-                    fused_out = rrf_fuse([bm25_ids], k=args.rrf_k)
-                    fused = as_ranked_list(fused_out)
-                    print(f"[Q{qi}] fusion=rrf (bm25-only) k={args.rrf_k}")
+                all_ids = set(bm25_ids) | set(dense_ids)
+                if not all_ids:
+                    print(f"[Q{qi}] WARN: no candidates from BM25/Dense")
+                    continue
+                bm25_norm = normalize_scores({i: bm25_scores.get(i, 0.0) for i in all_ids},
+                                             method=args.norm, temperature=args.temperature)
+                dense_norm = normalize_scores({i: dense_scores.get(i, 0.0) for i in all_ids},
+                                              method=args.norm, temperature=args.temperature)
+                fused_scores = {}
+                for i in all_ids:
+                    fused_scores[i] = args.w_bm25 * bm25_norm.get(i, 0.0) + args.w_dense * dense_norm.get(i, 0.0)
+                fused = [i for i, _ in sorted(fused_scores.items(), key=lambda kv: kv[1], reverse=True)]
+                print(f"[Q{qi}] fusion=weighted  w_bm25={args.w_bm25}  w_dense={args.w_dense} k={args.top_k}")
 
-            # ---- UNION-кандидати перед CE (замість жорсткого filter)
+            # --- 4) UNION логіка від клінічних словників + спеціальний thrush
             base = fused[: args.rerank_top] if fused else bm25_ids[: args.rerank_top]
-            if filt_ids and heuristic_tag:
-                seen = set()
-                union = []
-                for kdoc in list(base) + list(filt_ids):
-                    if kdoc not in seen:
-                        union.append(kdoc)
-                        seen.add(kdoc)
-                cand_ids = union[: args.rerank_top]
-                print(f"[Q{qi}] heuristic UNION applied [{heuristic_tag}]: base {len(base)} + heur {len(filt_ids)} -> {len(cand_ids)}")
-            else:
-                cand_ids = base
+            cand_ids = list(base)
+            heuristic_tags_applied: List[str] = []
+
+            matched_conditions: List[str] = []
+            if clinical and clinical.conditions:
+                matched_conditions = clinical.detect(q_low)
+                if matched_conditions:
+                    print(f"[Q{qi}] clinical HEUR matched: {', '.join(matched_conditions)}")
+                for cond in matched_conditions:
+                    pos_terms = clinical.positives(cond)
+                    if not pos_terms:
+                        continue
+
+                    # знайти документи за позитивними термінами
+                    heur_ids = [i for i, blob in enumerate(docs_raw_lower) if any_term_in(blob, pos_terms)]
+                    if not heur_ids:
+                        continue
+
+                    # BM25-gate: беремо тільки з top-N BM25 (чистий перетин)
+                    gateN = max(0, min(args.heuristic_bm25_gate_top, args.top_k))
+                    gate_set = set(bm25_ids[:gateN])
+                    picked = [i for i in heur_ids if i in gate_set][:gateN]
+
+                    # cap
+                    cap = max(0, args.heuristic_union_cap)
+                    union_before = len(cand_ids)
+                    for i in picked[:cap]:
+                        if i not in cand_ids:
+                            cand_ids.append(i)
+                    print(
+                        f"[Q{qi}] heuristic UNION CAPPED [{cond}]: base {union_before} + heur {len(heur_ids)} -> {len(cand_ids)} "
+                        f"(cap={cap}, picked={len(picked)} by BM25-gate={gateN})"
+                    )
+                    heuristic_tags_applied.append(cond)
+
+            # 4.b) SPECIAL: oral thrush
+            heuristic_tag_special = None
+            if ORAL_THRUSH_TRIGGER.search(q_low):
+                strict_ids = []
+                for i, blob in enumerate(docs_raw):
+                    comp_form_text = blob
+                    has_antifungal = bool(ANTIFUNGAL_TERMS.search(comp_form_text))
+                    has_allowed_oral = bool(ORAL_ALLOWED_FORM.search(comp_form_text)) or any_term_in(
+                        comp_form_text.lower(), oral_forms_allowed
+                    )
+                    if has_antifungal and has_allowed_oral:
+                        strict_ids.append(i)
+                if strict_ids:
+                    gateN = max(0, min(args.heuristic_bm25_gate_top, args.top_k))
+                    gate_set = set(bm25_ids[:gateN])
+                    picked = [i for i in strict_ids if i in gate_set][:gateN]
+                    cap = max(0, args.heuristic_union_cap)
+                    union_before = len(cand_ids)
+                    for i in picked[:cap]:
+                        if i not in cand_ids:
+                            cand_ids.append(i)
+                    print(
+                        f"[Q{qi}] heuristic UNION CAPPED [oral_thrush]: base {union_before} + heur {len(strict_ids)} -> {len(cand_ids)} "
+                        f"(cap={cap}, picked={len(picked)} by BM25-gate={gateN})"
+                    )
+                    heuristic_tag_special = "oral_thrush"
 
             if not cand_ids:
                 print(f"[Q{qi}] WARN: empty candidate set after fusion; skipping.")
                 continue
 
-            # Підготовка текстів для CE
+            # --- 5) CE rerank
             cand_docs = []
             for idx in cand_ids:
                 blob = docs_raw[idx] if 0 <= idx < len(docs_raw) else ""
@@ -599,45 +559,73 @@ def main():
                     blob = blob[: args.max_doc_chars]
                 cand_docs.append(blob)
 
-            # CE scores
             ce_scores = ce_rerank(ce, q, cand_docs, batch=args.ce_batch)
 
-            # евристичний bias у CE-бали (boost)
-            if heuristic_tag and args.heuristic_ce_bias > 0:
+            # --- 6) CE-bias
+            if args.heuristic_ce_bias > 0:
                 bias = float(args.heuristic_ce_bias)
-                ce_adj = []
-                for idx, s, blob in zip(cand_ids, ce_scores, cand_docs):
-                    s_adj = s
-                    doc_text = blob or ""
-                    if heuristic_tag in ("oral_thrush", "oral_thrush_soft", "oral_thrush_sys", "oral_thrush_soft_clean"):
-                        # + активи, + дозволені форми; − антисептики, − дерматоформи
-                        if ACTIVES_RX and ACTIVES_RX.search(doc_text):
-                            s_adj += bias * 0.60
-                        if ORAL_ALLOWED_FORM and ORAL_ALLOWED_FORM.search(doc_text):
-                            s_adj += bias * 0.40
-                        if THROAT_ANTISEPTIC and THROAT_ANTISEPTIC.search(doc_text):
-                            s_adj -= bias * 0.80
-                        if DERM_BLOCK_FORM and DERM_BLOCK_FORM.search(doc_text):
-                            s_adj -= bias * 0.60
-                    if heuristic_tag == "gastritis_acid":
-                        if ACID_POS_TERMS.search(doc_text):
-                            s_adj += bias * 0.75
-                    ce_adj.append(s_adj)
-                ce_scores = ce_adj
-                print(f"[Q{qi}] heuristic BOOST applied [{heuristic_tag}]: top {len(cand_ids)} promoted")
+                ce_adj: List[float] = []
 
-            # фінальний порядок topN за CE
+                for idx, s, blob in zip(cand_ids, ce_scores, cand_docs):
+                    s_adj = float(s)
+                    doc_text = (blob or "").lower()
+
+                    # Загальні штрафи
+                    if penalty_general and any_term_in(doc_text, penalty_general):
+                        s_adj -= bias * 0.60
+
+                    # SPECIAL patch: oral thrush
+                    if heuristic_tag_special == "oral_thrush":
+                        has_antifungal = bool(ANTIFUNGAL_TERMS.search(doc_text))
+                        has_allowed_oral = bool(ORAL_ALLOWED_FORM.search(doc_text)) or any_term_in(
+                            doc_text, oral_forms_allowed
+                        )
+                        has_systemic_oral = bool(ORAL_SYSTEMIC_FORM.search(doc_text))
+                        has_antiseptic = bool(THROAT_ANTISEPTIC.search(doc_text)) or any_term_in(
+                            doc_text, throat_antiseptics_ls
+                        )
+                        has_derm = bool(DERM_BLOCK_FORM.search(doc_text)) or any_term_in(doc_text, derm_block_ls)
+                        has_active_dict = any_term_in(doc_text, oral_actives)
+
+                        if has_allowed_oral and (has_antifungal or has_active_dict):
+                            s_adj += bias * 1.00
+                        if has_systemic_oral and not has_allowed_oral:
+                            s_adj -= bias * 0.75
+                        if has_antiseptic:
+                            s_adj -= bias * 1.20
+                        if has_derm:
+                            s_adj -= bias * 0.90
+
+                    # GENERIC: уже знайдені теми
+                    if matched_conditions:
+                        for cond in matched_conditions:
+                            pos = clinical.positives(cond) if clinical else []
+                            neg = clinical.penalties(cond) if clinical else []
+                            if pos and any_term_in(doc_text, pos):
+                                s_adj += bias * 0.80
+                            if neg and any_term_in(doc_text, neg):
+                                s_adj -= bias * 0.80
+
+                    ce_adj.append(s_adj)
+
+                ce_scores = ce_adj
+                if heuristic_tag_special or heuristic_tags_applied:
+                    msg = []
+                    if heuristic_tag_special:
+                        msg.append(heuristic_tag_special)
+                    msg.extend(heuristic_tags_applied)
+                    print(f"[Q{qi}] heuristic BOOST applied [{', '.join(msg)}]: top {len(cand_ids)} promoted")
+
+            # --- 7) Фінал
             order = list(np.argsort(ce_scores)[::-1]) if ce_scores else list(range(len(cand_ids)))
             final_ids = [cand_ids[i] for i in order][:10]
 
-            # друк TOP10
             print(f"[Q{qi}] TOP10:")
             for rank, did in enumerate(final_ids, 1):
                 nm = names[did] if 0 <= did < len(names) else f"doc_{did}"
                 print(f"  {rank:02d}. {nm}")
 
-            # збереження (додаємо трохи ширший “tail” для аналізу)
-            tail = (fused[:15] if fused else bm25_ids[:15])
+            tail = fused[:15] if fused else bm25_ids[:15]
             rec = {
                 "query_id": str(qobj.get("id") or qi - 1),
                 "query": q,
@@ -648,6 +636,7 @@ def main():
             fout.write(json.dumps(rec, ensure_ascii=False) + "\n")
 
     print(f"[DONE] wrote predictions -> {out_path}")
+
 
 if __name__ == "__main__":
     sys.exit(main())

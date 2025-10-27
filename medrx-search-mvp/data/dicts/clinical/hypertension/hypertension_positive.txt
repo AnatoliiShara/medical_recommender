@@ -1,0 +1,45 @@
+тіазидні діуретики
+hydrochlorothiazide
+індапамід
+indapamide
+хлорталідон
+chlorthalidone
+ACE інгібітори
+еналаприл
+lisinopril
+ramipril
+периндоприл
+ARBs
+losartan
+valsartan
+candesartan
+olmesartan
+блокатори кальцієвих каналів
+amlodipine
+nifedipine
+diltiazem
+beta-blocker
+metoprolol
+bisoprolol
+nebivolol
+комбінації (ACEi/ARB + CCB/diuretic)
+амлодипін
+ніфедипін
+дилтіазем
+лизіноприл
+раміприл
+периндоприл
+еналаприл
+лозартан
+валсартан
+кандесартан
+олмесартан
+гідрохлортіазид
+хлорталідон
+індапамід
+метопролол
+бісопролол
+небіволол
+комбінація амлодипін/валсартан
+комбінація лізиноприл/гідрохлортіазид
+комбінація периндоприл/індапамід
