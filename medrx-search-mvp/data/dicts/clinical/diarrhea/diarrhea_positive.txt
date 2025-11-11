@@ -1,45 +1,22 @@
-оральні регідратаційні розчини (ОРР)
-oral rehydration salts (ORS)
-rehydration therapy
-цинк
-zinc
-zinc sulfate
+оральні регідратаційні розчини
+ORS
+регідратація
 лоперамід
+імодіум
+діосмектит
+смекта
+рацекадотрил
+цинк
+оральні регідратаційні розчини
+ORS
+Регідрон
+діосмектит
+смекта
+diosmectite
+лоперамід
+імодіум
 loperamide
-бісмуту субсаліцилат
-bismuth subsalicylate
+цинк
+zinc (для дітей)
 рацекадотрил
 racecadotril
-ондансетрон
-ondansetron
-5-HT3 antagonist
-азитроміцин
-azithromycin
-рифаксимін
-rifaximin
-ніфуроксазид
-nifuroxazide
-ципрофлоксацин
-ciprofloxacin
-левофлоксацин
-levofloxacin
-нітазоксанід
-nitazoxanide
-метронідазол
-metronidazole
-тінідазол
-tinidazole
-фідаксоміцин
-fidaxomicin
-ванкоміцин (per os)
-vancomycin (oral)
-безлотоксумаб
-bezlotoxumab
-холестирамін
-cholestyramine
-колесевелам
-colesevelam
-колестипол
-colestipol
-елуксадолін
-eluxadoline

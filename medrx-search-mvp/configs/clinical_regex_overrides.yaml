@@ -1,0 +1,7 @@
+# Placeholder for complex clinical regex overrides (optional).
+# Example structure:
+# diarrhea:
+#   - pattern: (?i)\bгостр(а|ої)\s+діаре(я|ї)\b
+#     note: handle grammatical cases for "діарея"
+# constipation:
+#   - pattern: (?i)\b(констипаці\w+|запор(у|ом|и)?)\b
