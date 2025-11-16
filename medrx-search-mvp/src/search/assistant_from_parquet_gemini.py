@@ -1,6 +1,12 @@
 # -*- coding: utf-8 -*-
 """
-assistant_from_parquet.py — P0 end-to-end search pipeline (raw/norm split).
+assistant_from_parquet_gemini.py — P0 pipeline with Gemini LLM medical reranking (Phase 1).
+
+NEW in this version:
+  - Gemini LLM reranking after CrossEncoder (optional, --use_gemini flag)
+  - Medical safety validation via Gemini Pro
+  - Adaptive score combination (CE + Gemini)
+  - Clinical frame extraction (symptoms, red flags, urgency)
 
 Pipeline:
   Load corpus (parquet) → build doc blobs (RAW)
@@ -9,6 +15,7 @@ Pipeline:
   Dense (E5) FAISS over RAW (load or build & autosave)
   Fusion (weighted or WRRF) + optional UNION boost/force-include
   CrossEncoder rerank on RAW
+  [NEW] Gemini LLM medical reranking (safety + relevance)
   CE-bias from condition-specific positives/penalties
   Output TOP-N (JSONL) + stage logs (optional)
 """
@@ -56,6 +63,16 @@ try:
     )
 except Exception as e:
     raise ImportError(f"[normalizer] required module missing: {e}")
+
+# === Gemini LLM reranking (Phase 1) ===
+try:
+    from src.adapters.compendium_to_candidate import compendium_row_to_drug_candidate
+    from src.llm.gemini_reranker import gemini_rerank
+    from src.llm.types import DrugCandidate, ClinicalFrame, GeminiCandidateScore
+    GEMINI_AVAILABLE = True
+except Exception as e:
+    print(f"[WARN] Gemini reranker not available: {e}", file=sys.stderr)
+    GEMINI_AVAILABLE = False
 
 # === Stage logger (optional, with fallback) ===
 try:
@@ -332,7 +349,6 @@ class CEReranker:
     def __init__(self, model_name: str, device: str = "cpu"):
         if CrossEncoder is None:
             raise RuntimeError("sentence_transformers CrossEncoder not available")
-        # CrossEncoder API сам вирішить device; передамо хінт через kwargs, якщо треба
         self.model = CrossEncoder(model_name, max_length=512, device=device)
 
     def rerank(self, query_raw: str, docs_raw: List[str], batch_size: int = 16) -> List[float]:
@@ -355,14 +371,12 @@ def _filter_ids(ids: Iterable[int], n_docs: int) -> List[int]:
 def _safe_logger_close(logger):
     if logger is None:
         return
-    # finalize()
     fn = getattr(logger, "finalize", None)
     if callable(fn):
         try:
             fn()
         except Exception:
             pass
-    # save()
     sv = getattr(logger, "save", None)
     if callable(sv):
         try:
@@ -386,23 +400,23 @@ def run_pipeline(args: argparse.Namespace):
     # 2) Build RAW/NORM docs
     max_chars = args.max_doc_chars if args.max_doc_chars is not None else None
     doc_texts_raw: List[str] = [build_doc_blob_raw(row, max_chars=max_chars) for _, row in df.iterrows()]
-    _ = [normalize_text(t) for t in doc_texts_raw]  # (pre-warm normalizer, NORM inside BM25)
+    _ = [normalize_text(t) for t in doc_texts_raw]
 
     N = len(doc_texts_raw)
 
-    # 3) Clinical assets (build from RAW; NORM computed inside as well)
+    # 3) Clinical assets
     clinical = build_clinical_assets(doc_texts_raw, dict_root=args.dict_root)
 
     # 4) BM25 on NORM tokens
     bm25_index = BM25Okapi([normalize_tokens(tokenize(t)) for t in doc_texts_raw])
 
-    # 5) Dense index (RAW) load or build FAISS
+    # 5) Dense index (RAW)
     dense = DenseIndex(model_name=args.embed_model, faiss_index_path=args.faiss_index)
     dense.build_or_load(doc_texts_raw, rebuild_if_missing=True)
     if dense.ntotal is not None and dense.ntotal != N:
         print(f"[WARN] FAISS index ntotal={dense.ntotal} != corpus={N}. Filtering out-of-range ids.", file=sys.stderr)
 
-    # 6) CE model (RAW)
+    # 6) CE model
     try:
         ce = CEReranker(args.ce_model, device=getattr(args, "ce_device", "cpu"))
     except TypeError:
@@ -424,11 +438,11 @@ def run_pipeline(args: argparse.Namespace):
 
             logger = StageLogger(q_id, q_raw, stage_root)
 
-            # Detect clinical conditions (P0)
+            # Detect clinical conditions
             matched_conditions = detect_conditions(q_raw, clinical)
 
             # Retrieve
-            bm25_top_raw = bm25_index.search(q_norm, top_k=bm25_k)  # BM25 on NORM
+            bm25_top_raw = bm25_index.search(q_norm, top_k=bm25_k)
             bm25_top = _filter_valid(bm25_top_raw, N)
             if bm25_top:
                 logger.log_stage("bm25",
@@ -436,7 +450,7 @@ def run_pipeline(args: argparse.Namespace):
                                  {"k1": 1.5, "b": 0.75, "top_k": bm25_k})
 
             try:
-                dense_top_raw = dense.search(q_raw, top_k=dense_k)     # Dense on RAW
+                dense_top_raw = dense.search(q_raw, top_k=dense_k)
             except Exception as e:
                 print(f"[WARN] Dense search failed: {e}. Falling back to BM25-only.", file=sys.stderr)
                 dense_top_raw = []
@@ -446,7 +460,7 @@ def run_pipeline(args: argparse.Namespace):
                                  [{"id": i, "score": s} for i, s in dense_top[:50]],
                                  {"model": args.embed_model, "top_k": dense_k})
 
-            # Heuristic UNION (condition → docs)
+            # Heuristic UNION
             bm25_top_ids: Set[int] = {i for i, _ in bm25_top}
             union_ids_set = union_candidates_for_conditions(
                 assets=clinical,
@@ -499,7 +513,7 @@ def run_pipeline(args: argparse.Namespace):
                 }, ensure_ascii=False) + "\n")
                 continue
 
-            # CE on RAW
+            # CE rerank
             cand_texts_raw = [doc_texts_raw[i] for i in cand_ids]
             ce_scores = ce.rerank(q_raw, cand_texts_raw, batch_size=args.ce_batch)
             B_POS = float(getattr(args, "heuristic_ce_bias_pos", 0.15))
@@ -519,6 +533,110 @@ def run_pipeline(args: argparse.Namespace):
                              [{"id": i, "score": s} for i, s in ce_scored[:final_k]],
                              {"model": args.ce_model, "batch": args.ce_batch,
                               "bias_pos": B_POS, "bias_pen": B_PEN})
+
+            # ============================================
+            # [PHASE 1] GEMINI LLM MEDICAL RERANKING
+            # ============================================
+            if args.use_gemini and GEMINI_AVAILABLE:
+                try:
+                    print(f"[INFO] Query {q_id}: Running Gemini medical reranking...", file=sys.stderr)
+                    
+                    # [1] Take top-K after CE for Gemini analysis
+                    gemini_k = min(args.gemini_top_k, len(ce_scored))
+                    ce_top_k = ce_scored[:gemini_k]
+                    
+                    # [2] Convert to DrugCandidate objects
+                    gemini_candidates: List[DrugCandidate] = []
+                    for doc_id, ce_score in ce_top_k:
+                        row = df.iloc[doc_id]
+                        candidate = compendium_row_to_drug_candidate(
+                            row=row,
+                            ce_score=float(ce_score),
+                            drug_id=str(doc_id),
+                        )
+                        gemini_candidates.append(candidate)
+                    
+                    # [3] Call Gemini for medical reasoning
+                    clinical_frame, gemini_scored = gemini_rerank(
+                        query=q_raw,
+                        candidates=gemini_candidates,
+                    )
+                    
+                    # [4] Create mapping: drug_id → gemini_data
+                    gemini_map: Dict[str, GeminiCandidateScore] = {
+                        g.drug_id: g for g in gemini_scored
+                    }
+                    
+                    # [5] Combine CE + Gemini scores with adaptive weighting
+                    final_scored: List[Tuple[int, float]] = []
+                    for doc_id, ce_score in ce_top_k:
+                        gemini_data = gemini_map.get(str(doc_id))
+                        
+                        if gemini_data is None:
+                            # Fallback: use CE score if Gemini didn't evaluate
+                            final_scored.append((doc_id, ce_score))
+                            continue
+                        
+                        # Normalize scores to 0-1 range
+                        ce_norm = float(ce_score)
+                        gemini_norm = gemini_data.gemini_score / 10.0
+                        
+                        # ADAPTIVE COMBINATION STRATEGY
+                        if gemini_data.safety_label == "contraindicated":
+                            # HARD FILTER: contraindicated → score 0
+                            combined = 0.0
+                        elif gemini_data.gemini_score < 3:
+                            # Low confidence: mostly filter
+                            combined = gemini_norm * 0.3
+                        elif gemini_data.gemini_score >= 8:
+                            # High confidence: trust medical reasoning
+                            combined = 0.8 * gemini_norm + 0.2 * ce_norm
+                        elif gemini_data.gemini_score >= 5:
+                            # Moderate: balanced
+                            combined = 0.6 * gemini_norm + 0.4 * ce_norm
+                        else:
+                            # Low Gemini score (3-4): trust CE more
+                            combined = 0.3 * gemini_norm + 0.7 * ce_norm
+                        
+                        final_scored.append((doc_id, combined))
+                    
+                    # [6] Re-sort by combined scores
+                    final_scored.sort(key=lambda x: x[1], reverse=True)
+                    
+                    # [7] Log Gemini stage
+                    logger.log_stage("gemini_rerank", [
+                        {
+                            "id": doc_id,
+                            "score": score,
+                            "gemini_score": gemini_map.get(str(doc_id)).gemini_score if gemini_map.get(str(doc_id)) else None,
+                            "safety": gemini_map.get(str(doc_id)).safety_label if gemini_map.get(str(doc_id)) else None,
+                            "line": gemini_map.get(str(doc_id)).line_of_therapy if gemini_map.get(str(doc_id)) else None,
+                        }
+                        for doc_id, score in final_scored[:final_k]
+                    ], {
+                        "model": "gemini-2.5-pro",
+                        "candidates_evaluated": len(gemini_candidates),
+                        "urgency": clinical_frame.urgency if clinical_frame else "unknown",
+                        "red_flags": clinical_frame.red_flags if clinical_frame else [],
+                    })
+                    
+                    # [8] Replace ce_scored with final_scored for output
+                    ce_scored = final_scored
+                    
+                    print(f"[INFO] Query {q_id}: Gemini reranking completed successfully", file=sys.stderr)
+                    
+                except Exception as e:
+                    # Fallback: if Gemini fails, continue with CE scores
+                    print(f"[WARN] Gemini reranking failed for query {q_id}: {e}", file=sys.stderr)
+                    import traceback
+                    traceback.print_exc()
+                    # ce_scored remains unchanged
+            
+            elif args.use_gemini and not GEMINI_AVAILABLE:
+                print(f"[WARN] --use_gemini specified but Gemini not available. Skipping.", file=sys.stderr)
+            # ============================================
+            # END GEMINI RERANKING
+            # ============================================
 
             # Output
             top_n = min(final_k, len(ce_scored))
@@ -555,24 +673,30 @@ def run_pipeline(args: argparse.Namespace):
 # CLI
 # ---------------------------
 def build_argparser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser("assistant_from_parquet (P0, raw/norm split)")
+    p = argparse.ArgumentParser("assistant_from_parquet_gemini (P0 + Gemini LLM reranking)")
 
     # Core inputs
-    p.add_argument("--dataset", type=str, default="data/raw/compendium_all.parquet", help="Path to compendium_all.parquet")
+    p.add_argument("--dataset", type=str, default="data/raw/compendium_all.parquet")
     p.add_argument("--queries", type=str, required=True, help="JSONL with {'query': ...}")
     p.add_argument("--out_json", type=str, default="data/eval/predictions.jsonl")
 
     # Retrieval & models
     p.add_argument("--embed_model", type=str, default="intfloat/multilingual-e5-base")
-    p.add_argument("--faiss_index", type=str, default="", help="Path to faiss index. If missing, will be built & autosaved.")
+    p.add_argument("--faiss_index", type=str, default="")
     p.add_argument("--ce_model", type=str, default="BAAI/bge-reranker-v2-m3")
     p.add_argument("--ce_device", type=str, default="cpu")
-    p.add_argument("--top_k", type=int, default=60)  # загальний fallback
+    p.add_argument("--top_k", type=int, default=60)
     p.add_argument("--bm25_top_k", type=int, default=120)
     p.add_argument("--dense_top_k", type=int, default=80)
     p.add_argument("--rerank_top", type=int, default=25)
     p.add_argument("--final_top_k", type=int, default=20)
     p.add_argument("--ce_batch", type=int, default=8)
+
+    # [NEW] Gemini reranking
+    p.add_argument("--use_gemini", action="store_true",
+                   help="Enable Gemini LLM medical reranking after CrossEncoder")
+    p.add_argument("--gemini_top_k", type=int, default=15,
+                   help="Number of CE candidates to send to Gemini (default: 15)")
 
     # Fusion
     p.add_argument("--fusion", type=str, default="weighted", choices=["weighted","wrrf"])
@@ -583,7 +707,7 @@ def build_argparser() -> argparse.ArgumentParser:
     p.add_argument("--temperature", type=float, default=1.0)
     p.add_argument("--candidate_mode", type=str, default="union", choices=["union","fused"])
 
-    # P0 clinical config
+    # Clinical config
     p.add_argument("--dict_root", type=str, default="data/dicts/clinical")
     p.add_argument("--heuristic_union_cap", type=int, default=20)
     p.add_argument("--heuristic_ce_bias_pos", type=float, default=0.15)
@@ -606,6 +730,7 @@ def build_argparser() -> argparse.ArgumentParser:
     p.add_argument("--subset_tag", type=str, default="all")
 
     return p
+
 
 def main():
     args = build_argparser().parse_args()

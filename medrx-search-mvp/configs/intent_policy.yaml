@@ -1,74 +1,84 @@
-default:
-  doc_topN: 800
-  k_final: 300
-  gate:
-    mode: prefer
-    sections:
-    - Показання
-    - Спосіб застосування та дози
-    - Протипоказання
-    - Побічні реакції
-    weight: 1.0
-  ce_top: 0
-  ce_weight: 0.65
-indication:
-  doc_topN: 800
-  k_final: 300
-  gate:
-    mode: prefer
-    sections:
-    - Показання
-    weight: 1.0
-  ce_top: 0
-  ce_weight: 0.65
-dosage:
-  doc_topN: 600
-  k_final: 200
-  gate:
-    mode: prefer
-    sections:
-    - Спосіб застосування та дози
-    weight: 1.0
-  ce_top: 0
-  ce_weight: 0.65
-contraindication:
-  doc_topN: 800
-  k_final: 300
-  gate:
-    mode: require
-    sections:
-    - Протипоказання
-    weight: 1.0
-  ce_top: 0
-  ce_weight: 0.65
-interactions:
-  doc_topN: 800
-  k_final: 300
-  gate:
-    mode: require
-    sections:
-    - Взаємодія з іншими лікарськими засобами та інші види взаємодій
-    weight: 1.0
-  ce_top: 0
-  ce_weight: 0.65
-side_effects:
-  doc_topN: 600
-  k_final: 250
-  gate:
-    mode: prefer
-    sections:
-    - Побічні реакції
-    weight: 1.0
-  ce_top: 0
-  ce_weight: 0.65
-unknown:
-  doc_topN: 800
-  k_final: 300
-  gate:
-    mode: prefer
-    sections:
-    - Показання
-    - Спосіб застосування та дози
-    weight: 1.0
-  ce_top: 0
-  ce_weight: 0.65
+version: 0.2
+condition: diarrhea
+
+normalization:
+  casefold: true
+  strip_quotes: true
+  trim_whitespace: true
+  wildcard_char: "*"
+
+weights:
+  base:
+    trigger: 1.0
+    positive: 1.5
+    penalty: -1.5
+  boosts:
+    # ключові втручання
+    "оральні регідратаційні розчини|ОРС|oral rehydration solution|ORS": 3.0
+    "цинк|zinc": 2.0
+    "діосмектит|diosmectite|смекта|неосмектин|смекталія": 1.5
+    "лоперамід|loperamide|імодіум|стоперан": 1.2
+    "рацекадотрил|racecadotril": 1.2
+    "rifaximin|рифаксимін|альфа нормікс|alpha normix": 1.2
+    # allowlist для S. boulardii
+    "saccharomyces boulardii|S. boulardii|ентерол|enterol": 1.0
+  demotions:
+    # специфічні заборонені/сумнівні підходи
+    "гомеопат*|homeopath*": -3.0
+    "activated charcoal|активоване вугілля": -2.0
+    "kaolin-pectin|каолін пектин": -2.0
+    "BRAT": -2.0
+    "codeine|кодеїн|diphenoxylate|дифеноксилат": -3.0
+    "enterogermina|bacillus clausii": -2.0
+    "йогурт|актив флора|детокс": -1.5
+    "бісакодил|сенна|сеннозиди|натрію пікосульфат|касторова олія|магнію сульфат|лактулоза|макрогол|клізма|проносне": -3.0
+
+intents:
+  - name: red_flags
+    match_any:
+      - "(кров|чорний кал|мелена)"
+      - "(висока|сильна) лихоманка|> ?38[.,]?5"
+      - "сильне зневоднення|сухий язик|рідке сечовипускання"
+      - "сильний біль у животі"
+      - "вагітн|імунодефіцит|онко|похилий вік|> ?65"
+    actions:
+      - set_priority: "safety_first"
+      - demote: "лоперамід|loperamide"        # протипоказ при кривавій/високофебрильній діареї
+      - boost: "регідратац|ORS|oral rehydration" # акцент на ОРС
+      - add_banner: "Підозра на ускладнення — потрібен огляд лікаря якомога швидше."
+
+  - name: pediatric
+    match_any:
+      - "дитин|дитяч|молодш(е|ого)|місяц(і|ів)|рок(и|ів)"
+      - "y/o|years old|months old| toddler|infant|child"
+    actions:
+      - demote: "лоперамід|loperamide|імодіум|стоперан"
+      - demote: "bismuth subsalicylate|вісмут"
+      - boost: "цинк|zinc"
+      - boost: "ORS|регідрон|оральні регідратаційні"
+      - override_weight:
+          pattern: "saccharomyces boulardii|ентерол"
+          positive_weight: 1.0
+
+  - name: travellers_diarrhea
+    match_any:
+      - "traveler's diarrhea|traveller's diarrhoea|подорож|мандрівн"
+    actions:
+      - boost: "rifaximin|рифаксимін|альфа нормікс|alpha normix"
+      - add_note: "Антибіотики розглядають при помірній/тяжкій TД; у легких випадках — пріоритет ОРС."
+
+  - name: chronic_diarrhea
+    match_any:
+      - "хронічн|> ?(3|4) ?тиж|weeks"
+    actions:
+      - add_note: "Хронічна діарея потребує діагностики (мальабсорбція, IBD, тиреотоксикоз тощо). Рекомендації симптоматичні — тимчасові."
+      - boost: "регідратац|ORS"
+      - demote: "симптоматичні лише без діагностики"  # якщо у вас є такий тег
+
+resolution:
+  conflict_rules:
+    - if: "saccharomyces boulardii present AND generic probiotic present"
+      then: "apply allowlist (S. boulardii) and ignore generic probiotic demotion"
+  ranking:
+    - primary: "sum(weights)"
+    - tiebreakers: ["freshness", "domain_trust", "exact_phrase_hits"]

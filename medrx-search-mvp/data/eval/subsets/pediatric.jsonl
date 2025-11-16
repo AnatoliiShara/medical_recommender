@@ -1,0 +1,2 @@
+{"id": 3, "intent": "indication", "query": "кращий засіб від діареї у дитини 6 років", "pediatric": true, "pregnancy": false, "no_antibiotics": false, "common_cold": false, "diarrhea": true, "hypertension": false, "complexity": "moderate"}
+{"id": 33, "intent": "indication", "query": "краплі в ніс від алергії дитині 8 років", "pediatric": true, "pregnancy": false, "no_antibiotics": false, "common_cold": false, "diarrhea": false, "hypertension": false, "complexity": "simple"}

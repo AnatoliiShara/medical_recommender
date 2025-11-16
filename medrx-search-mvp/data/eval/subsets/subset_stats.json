@@ -1,0 +1,11 @@
+{
+  "all": 60,
+  "pediatric": 2,
+  "no_antibiotics": 1,
+  "common_cold": 13,
+  "diarrhea": 20,
+  "hypertension": 5,
+  "simple": 10,
+  "moderate": 45,
+  "complex": 5
+}

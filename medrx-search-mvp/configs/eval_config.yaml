@@ -1,0 +1,52 @@
+# configs/eval_config.yaml
+data:
+  queries: "data/eval/queries_medrx_ua.enhanced.jsonl"
+  corpus: "data/processed/clean_medical.parquet"  # або artifacts_backup/clean_medical.parquet
+  subsets_dir: "data/eval/subsets"
+  gold_standard: null
+
+search:
+  bi_encoder: "models/medical-search-ua-fixed"
+  cross_encoder: "BAAI/bge-reranker-v2-m3"
+  bm25_top_k: 50
+  dense_top_k: 50
+  rrf_alpha: 60
+  use_weighted_rrf: true
+  w_bm25: 2.0
+  w_dense: 1.0
+  use_crossencoder: true
+  ce_top_k: 20
+  ce_model_device: "cpu"
+  final_top_k: 10
+
+evaluation:
+  metrics: [precision, recall, ndcg, mrr, map, f1, hit_rate]
+  k_values: [5, 10, 20, 50, 100]
+  subsets: [all, simple, moderate, complex, pediatric, no_antibiotics, common_cold, diarrhea, hypertension]
+  significance_test: true
+  confidence_level: 0.95
+
+logging:
+  log_stages: true
+  log_output_dir: "runs/{run_name}/stage_logs"
+  log_per_query: true
+  aggregate_stage_analysis: true
+  verbosity: 1
+
+output:
+  runs_dir: "runs"
+  run_name: null
+  save_query_results: true
+  save_metrics_json: true
+  save_metrics_csv: true
+  save_stage_logs: true
+  save_dashboard: true
+  compare_with: null
+
+performance:
+  n_jobs: 4
+  batch_size: 32
+  preload_embeddings: true
+  cache_bm25_index: true
+
+random_seed: 42
