@@ -1,3 +1,4 @@
+### **Файл 2: `src/search/assistant_from_parquet_gemini.py`** (MODIFIED)
 # -*- coding: utf-8 -*-
 """
 assistant_from_parquet_gemini.py — P0 pipeline with Gemini LLM medical reranking (Phase 1).
@@ -7,6 +8,7 @@ NEW in this version:
   - Medical safety validation via Gemini Pro
   - Adaptive score combination (CE + Gemini)
   - Clinical frame extraction (symptoms, red flags, urgency)
+  - [PHASE 1.5] Medical priors boosting (--use_medical_priors flag)
 
 Pipeline:
   Load corpus (parquet) → build doc blobs (RAW)
@@ -14,6 +16,7 @@ Pipeline:
   BM25 over NORM tokens
   Dense (E5) FAISS over RAW (load or build & autosave)
   Fusion (weighted or WRRF) + optional UNION boost/force-include
+  [NEW] Medical Priors Boosting (Phase 1.5)
   CrossEncoder rerank on RAW
   [NEW] Gemini LLM medical reranking (safety + relevance)
   CE-bias from condition-specific positives/penalties
@@ -74,6 +77,14 @@ except Exception as e:
     print(f"[WARN] Gemini reranker not available: {e}", file=sys.stderr)
     GEMINI_AVAILABLE = False
 
+# === Medical Priors (Phase 1.5) ===
+try:
+    from src.search.medical_priors import MedicalPriorsEngine
+    PRIORS_AVAILABLE = True
+except Exception as e:
+    print(f"[WARN] Medical priors not available: {e}", file=sys.stderr)
+    PRIORS_AVAILABLE = False
+
 # === Stage logger (optional, with fallback) ===
 try:
     from src.qtrace.stage_logger import StageLogger as _BaseStageLogger
@@ -94,13 +105,14 @@ except Exception:
             pass
 
         def save(self):
-            path = self.out_dir / f"q_{int(self.query_id):04d}.json"
+            path = self.out_dir / f"qid_{int(self.query_id)}.stages.json"
             with open(path, "w", encoding="utf-8") as f:
                 json.dump({
-                    "query_id": self.query_id,
+                    "qid": str(self.query_id),
                     "query": self.query_text,
-                    "stages": self.stages
-                }, f, ensure_ascii=False, indent=2)
+                    "stages": self.stages,
+                    "final_size": len(self.stages[-1]["items"]) if self.stages else 0
+                }, f, ensure_ascii=False, indent=4)
 
 StageLogger = _BaseStageLogger
 
@@ -416,11 +428,20 @@ def run_pipeline(args: argparse.Namespace):
     if dense.ntotal is not None and dense.ntotal != N:
         print(f"[WARN] FAISS index ntotal={dense.ntotal} != corpus={N}. Filtering out-of-range ids.", file=sys.stderr)
 
-    # 6) CE model
+    # 6) CE model (RAW)
     try:
         ce = CEReranker(args.ce_model, device=getattr(args, "ce_device", "cpu"))
     except TypeError:
         ce = CEReranker(args.ce_model)
+
+    # 6.5) Medical Priors Engine (Phase 1.5)
+    priors_engine = None
+    if args.use_medical_priors and PRIORS_AVAILABLE:
+        try:
+            priors_engine = MedicalPriorsEngine(args.priors_path, df)
+            print(f"[INFO] Medical priors engine loaded", file=sys.stderr)
+        except Exception as e:
+            print(f"[WARN] Failed to load medical priors: {e}", file=sys.stderr)
 
     # 7) Load queries
     run_id = args.run_id or "adhoc"
@@ -428,7 +449,9 @@ def run_pipeline(args: argparse.Namespace):
     stage_root = Path("runs") / run_id / "stage_logs" / subset_tag
 
     queries = load_queries(args.queries)
-    os.makedirs(os.path.dirname(args.out_json), exist_ok=True)
+    out_dir = os.path.dirname(args.out_json)
+    if out_dir:
+        os.makedirs(out_dir, exist_ok=True)
 
     with open(args.out_json, "w", encoding="utf-8") as fout:
         for qi, qobj in enumerate(queries):
@@ -446,7 +469,8 @@ def run_pipeline(args: argparse.Namespace):
             bm25_top = _filter_valid(bm25_top_raw, N)
             if bm25_top:
                 logger.log_stage("bm25",
-                                 [{"id": i, "score": s} for i, s in bm25_top[:50]],
+                                 [{"id": i, "bm25": None, "dense": None, "ce": None, 
+                                   "evidence": None, "final": s} for i, s in bm25_top[:50]],
                                  {"k1": 1.5, "b": 0.75, "top_k": bm25_k})
 
             try:
@@ -457,7 +481,8 @@ def run_pipeline(args: argparse.Namespace):
             dense_top = _filter_valid(dense_top_raw, N)
             if dense_top:
                 logger.log_stage("dense",
-                                 [{"id": i, "score": s} for i, s in dense_top[:50]],
+                                 [{"id": i, "bm25": None, "dense": None, "ce": None,
+                                   "evidence": None, "final": s} for i, s in dense_top[:50]],
                                  {"model": args.embed_model, "top_k": dense_k})
 
             # Heuristic UNION
@@ -485,9 +510,41 @@ def run_pipeline(args: argparse.Namespace):
                 for did in union_ids:
                     fused[did] = fused.get(did, 0.0) + float(args.union_boost)
 
+            # ============================================
+            # [PHASE 1.5] APPLY MEDICAL PRIORS
+            # ============================================
+            if priors_engine:
+                try:
+                    priors_boosts = priors_engine.get_boosts(
+                        matched_conditions=matched_conditions,
+                        query_text=q_raw
+                    )
+                    
+                    if priors_boosts:
+                        print(f"[INFO] Query {q_id}: Applying priors to {len(priors_boosts)} drugs", 
+                              file=sys.stderr)
+                        
+                        for doc_id, boost in priors_boosts.items():
+                            # Convert boost (0.02-0.05) to score boost
+                            # Scale factor: 300.0 ensures critical drugs are guaranteed in top
+                            score_boost = boost * 300.0  # 0.05 × 300 = 15.0 massive boost
+                            
+                            if doc_id in fused:
+                                fused[doc_id] += score_boost
+                            else:
+                                # Force include even if not in BM25/Dense results
+                                fused[doc_id] = score_boost
+                
+                except Exception as e:
+                    print(f"[WARN] Failed to apply priors for query {q_id}: {e}", file=sys.stderr)
+            # ============================================
+            # END MEDICAL PRIORS
+            # ============================================
+
             fused_sorted = sorted(fused.items(), key=lambda x: x[1], reverse=True)[:50]
             logger.log_stage("fusion",
-                             [{"id": i, "score": s} for i, s in fused_sorted],
+                             [{"id": i, "bm25": None, "dense": None, "ce": None,
+                               "evidence": None, "final": s} for i, s in fused_sorted],
                              {"method": args.fusion, "w_bm25": args.w_bm25, "w_dense": args.w_dense,
                               "norm": args.norm, "rrf_alpha": args.rrf_alpha,
                               "union_boost": args.union_boost, "union_count": len(union_ids)})
@@ -530,7 +587,8 @@ def run_pipeline(args: argparse.Namespace):
                 ce_scored.append((doc_id, ce_s + delta))
             ce_scored.sort(key=lambda x: x[1], reverse=True)
             logger.log_stage("crossencoder",
-                             [{"id": i, "score": s} for i, s in ce_scored[:final_k]],
+                             [{"id": i, "bm25": None, "dense": None, "ce": None,
+                               "evidence": None, "final": s} for i, s in ce_scored[:final_k]],
                              {"model": args.ce_model, "batch": args.ce_batch,
                               "bias_pos": B_POS, "bias_pen": B_PEN})
 
@@ -607,10 +665,11 @@ def run_pipeline(args: argparse.Namespace):
                     logger.log_stage("gemini_rerank", [
                         {
                             "id": doc_id,
-                            "score": score,
-                            "gemini_score": gemini_map.get(str(doc_id)).gemini_score if gemini_map.get(str(doc_id)) else None,
-                            "safety": gemini_map.get(str(doc_id)).safety_label if gemini_map.get(str(doc_id)) else None,
-                            "line": gemini_map.get(str(doc_id)).line_of_therapy if gemini_map.get(str(doc_id)) else None,
+                            "bm25": None,
+                            "dense": None,
+                            "ce": None,
+                            "evidence": None,
+                            "final": score,
                         }
                         for doc_id, score in final_scored[:final_k]
                     ], {
@@ -630,7 +689,6 @@ def run_pipeline(args: argparse.Namespace):
                     print(f"[WARN] Gemini reranking failed for query {q_id}: {e}", file=sys.stderr)
                     import traceback
                     traceback.print_exc()
-                    # ce_scored remains unchanged
             
             elif args.use_gemini and not GEMINI_AVAILABLE:
                 print(f"[WARN] --use_gemini specified but Gemini not available. Skipping.", file=sys.stderr)
@@ -673,7 +731,7 @@ def run_pipeline(args: argparse.Namespace):
 # CLI
 # ---------------------------
 def build_argparser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser("assistant_from_parquet_gemini (P0 + Gemini LLM reranking)")
+    p = argparse.ArgumentParser("assistant_from_parquet_gemini (P0 + Gemini LLM + Medical Priors)")
 
     # Core inputs
     p.add_argument("--dataset", type=str, default="data/raw/compendium_all.parquet")
@@ -697,6 +755,13 @@ def build_argparser() -> argparse.ArgumentParser:
                    help="Enable Gemini LLM medical reranking after CrossEncoder")
     p.add_argument("--gemini_top_k", type=int, default=15,
                    help="Number of CE candidates to send to Gemini (default: 15)")
+
+    # [NEW] Medical Priors (Phase 1.5)
+    p.add_argument("--use_medical_priors", action="store_true",
+                   help="Enable medical priors boosting based on detected conditions")
+    p.add_argument("--priors_path", type=str, 
+                   default="data/priors/disease_med_priors.jsonl",
+                   help="Path to disease_med_priors.jsonl")
 
     # Fusion
     p.add_argument("--fusion", type=str, default="weighted", choices=["weighted","wrrf"])
