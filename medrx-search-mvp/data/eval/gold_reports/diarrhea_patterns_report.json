@@ -1,0 +1,541 @@
+{
+  "docs_meta": "data/processed/embeddings/intfloat-multilingual-e5-base/docs_meta.parquet",
+  "in_queries": "data/eval/queries_medrx_ua.with_gold.v2.smoke.jsonl",
+  "out_queries": "data/eval/queries_medrx_ua.with_gold.v2.smoke.fixed.diarrhea.jsonl",
+  "condition": "diarrhea",
+  "modes": {
+    "core": {
+      "unique_doc_ids": 63,
+      "patterns": {
+        "лоперам": {
+          "hits": 6,
+          "examples": [
+            "Лоперамід-Здоров'я (Loperamide-Zdorovye)",
+            "Лоперамід Гріндекс (Loperamid Grindeks)",
+            "Лопераміду гідрохлорид (Loperamidi hydrochloride)",
+            "Лоперамід (Loperamide)",
+            "Лоперамід (Loperamidum)"
+          ]
+        },
+        "імодіум": {
+          "hits": 3,
+          "examples": [
+            "Імодіум ® (Imodium ® Lingual)",
+            "Імодіум ® Експрес (IMODIUM ® EXPRESS)",
+            "Імодіум ® Дуо"
+          ]
+        },
+        "imodium": {
+          "hits": 2,
+          "examples": [
+            "Імодіум ® (Imodium ® Lingual)",
+            "Імодіум ® Експрес (IMODIUM ® EXPRESS)"
+          ]
+        },
+        "loperam": {
+          "hits": 6,
+          "examples": [
+            "Лоперамід-Здоров'я (Loperamide-Zdorovye)",
+            "Лоперамід Гріндекс (Loperamid Grindeks)",
+            "Лопераміду гідрохлорид (Loperamidi hydrochloride)",
+            "Лоперамід (Loperamide)",
+            "Лоперамід (Loperamidum)"
+          ]
+        },
+        "ніфурокс": {
+          "hits": 11,
+          "examples": [
+            "Ніфуроксазид таблетки (Nifuroxazide tablets)",
+            "Ніфуроксазид (Nifuroxazidum)",
+            "Ніфуроксазид-Сперко капсули (Nifuroxazide-Sperco capsules )",
+            "Ніфуроксазид Ріхтер таблетки (Nifuroxazid Richter tablets )",
+            "Ніфуроксазид Алкалоїд (Nifuroxazide Alkaloid ® )"
+          ]
+        },
+        "nifurox": {
+          "hits": 11,
+          "examples": [
+            "Ніфуроксазид таблетки (Nifuroxazide tablets)",
+            "Ніфуроксазид (Nifuroxazidum)",
+            "Ніфуроксазид-Сперко капсули (Nifuroxazide-Sperco capsules )",
+            "Ніфуроксазид Ріхтер таблетки (Nifuroxazid Richter tablets )",
+            "Ніфуроксазид Алкалоїд (Nifuroxazide Alkaloid ® )"
+          ]
+        },
+        "ентерофурил": {
+          "hits": 1,
+          "examples": [
+            "Ентерофурил ® (Enterofuril)"
+          ]
+        },
+        "enterofuril": {
+          "hits": 1,
+          "examples": [
+            "Ентерофурил ® (Enterofuril)"
+          ]
+        },
+        "ерцефурил": {
+          "hits": 0,
+          "examples": []
+        },
+        "ercefur": {
+          "hits": 0,
+          "examples": []
+        },
+        "смекта": {
+          "hits": 2,
+          "examples": [
+            "Смекта ® (Smecta ® )",
+            "Смекталія ® (Smectalia ® )"
+          ]
+        },
+        "smecta": {
+          "hits": 2,
+          "examples": [
+            "Смекта ® (Smecta ® )",
+            "Смекталія ® (Smectalia ® )"
+          ]
+        },
+        "діосмектит": {
+          "hits": 1,
+          "examples": [
+            "Діосмектит (Diosmectite)"
+          ]
+        },
+        "diosmect": {
+          "hits": 1,
+          "examples": [
+            "Діосмектит (Diosmectite)"
+          ]
+        },
+        "ентеросгель": {
+          "hits": 2,
+          "examples": [
+            "Ентеросгель (Enterosgelum)",
+            "Лактобіоентеросгель (Lactobioenterosgel)"
+          ]
+        },
+        "enterosgel": {
+          "hits": 2,
+          "examples": [
+            "Ентеросгель (Enterosgelum)",
+            "Лактобіоентеросгель (Lactobioenterosgel)"
+          ]
+        },
+        "атоксил": {
+          "hits": 0,
+          "examples": []
+        },
+        "atoxil": {
+          "hits": 2,
+          "examples": [
+            "Атоксіл (Atoxil)",
+            "Атоксіл плюс (Atoxil plus)"
+          ]
+        },
+        "полісорб": {
+          "hits": 2,
+          "examples": [
+            "Полісорбент Нео (Polisorbent Neo)",
+            "Полісорб плюс (Polysorb plus)"
+          ]
+        },
+        "polysorb": {
+          "hits": 1,
+          "examples": [
+            "Полісорб плюс (Polysorb plus)"
+          ]
+        },
+        "ентерол": {
+          "hits": 4,
+          "examples": [
+            "Ентеролакс (Enterolax)",
+            "Ентерол 250 капсули (Enterol ® 250 capsules )",
+            "Ентерол ® Імуно (Enterol Immuno)",
+            "Ентерол 250 порошок для орального застосування (Enterol ® 250 powder for oral administration )"
+          ]
+        },
+        "enterol": {
+          "hits": 4,
+          "examples": [
+            "Ентеролакс (Enterolax)",
+            "Ентерол 250 капсули (Enterol ® 250 capsules )",
+            "Ентерол ® Імуно (Enterol Immuno)",
+            "Ентерол 250 порошок для орального застосування (Enterol ® 250 powder for oral administration )"
+          ]
+        },
+        "saccharomyces": {
+          "hits": 0,
+          "examples": []
+        },
+        "хілак": {
+          "hits": 1,
+          "examples": [
+            "Хілак Форте (Hylak Forte)"
+          ]
+        },
+        "hilak": {
+          "hits": 0,
+          "examples": []
+        },
+        "лінекс": {
+          "hits": 16,
+          "examples": [
+            "Лінекс Форте ® (Linex Forte ® )",
+            "Лінекс ® (Linex ® )",
+            "Лінекс Бебі ® (Linex Baby ® )",
+            "Хустинки носові паперові Клінекс (Napkins Kleenex)",
+            "Серветки Клінекс (Kleenex wipes)"
+          ]
+        },
+        "linex": {
+          "hits": 6,
+          "examples": [
+            "Лінекс Форте ® (Linex Forte ® )",
+            "Лінекс ® (Linex ® )",
+            "Лінекс Бебі ® (Linex Baby ® )",
+            "ЛІНЕКС ® ДИТЯЧІ КРАПЛІ (LINEX ® KIDS DROPS)",
+            "Фарлінекс (Farlinex)"
+          ]
+        },
+        "регідрон": {
+          "hits": 2,
+          "examples": [
+            "Регідрон (Rehydron)",
+            "Регідрон Оптім (Rehydron Optim)"
+          ]
+        },
+        "regidron": {
+          "hits": 0,
+          "examples": []
+        },
+        "rehydrat": {
+          "hits": 3,
+          "examples": [
+            "Ізісолт фор кідс регідратант (Easysalt for kids rehydrate)",
+            "Ізісолт регідратант (Easysalt rehydrate)",
+            "Регідратон (Rehydraton)"
+          ]
+        },
+        "сорбекс": {
+          "hits": 3,
+          "examples": [
+            "Сорбекс ® (Sorbex ® )",
+            "Добавка дієтична на основі активованого вугілля \"Сорбекс ® (Dietary supplement based on activated charcoal Sorbex ® )",
+            "ДОБАВКА ДІЄТИЧНА НА ОСНОВІ АКТИВОВАНОГО ВУГІЛЛЯ \"СОРБЕКС ® АлкоЗахист\" (SORBEX AlkoProtection)"
+          ]
+        },
+        "sorbex": {
+          "hits": 3,
+          "examples": [
+            "Сорбекс ® (Sorbex ® )",
+            "Добавка дієтична на основі активованого вугілля \"Сорбекс ® (Dietary supplement based on activated charcoal Sorbex ® )",
+            "ДОБАВКА ДІЄТИЧНА НА ОСНОВІ АКТИВОВАНОГО ВУГІЛЛЯ \"СОРБЕКС ® АлкоЗахист\" (SORBEX AlkoProtection)"
+          ]
+        },
+        "активоване вугіл": {
+          "hits": 1,
+          "examples": [
+            "Сорбі-норм активоване вугілля (Sorbi-norm activated carbon)"
+          ]
+        },
+        "activated charcoal": {
+          "hits": 3,
+          "examples": [
+            "Анти Токсин+ ® Мульті гель з активованим вугіллям зі смаком смородини (Anti Toxin+ Multi gel with activated charcoal with currant flavor)",
+            "Добавка дієтична на основі активованого вугілля \"Сорбекс ® (Dietary supplement based on activated charcoal Sorbex ® )",
+            "Гель сорбент з активованим вугіллям смородиновий +Biolikar™ (Gel sorbent with activated charcoal currant +Biolikar™)"
+          ]
+        },
+        "стопдіар": {
+          "hits": 1,
+          "examples": [
+            "Стопдіар (Stopdiar)"
+          ]
+        },
+        "stopdiar": {
+          "hits": 1,
+          "examples": [
+            "Стопдіар (Stopdiar)"
+          ]
+        }
+      }
+    },
+    "child": {
+      "unique_doc_ids": 34,
+      "patterns": {
+        "смекта": {
+          "hits": 2,
+          "examples": [
+            "Смекта ® (Smecta ® )",
+            "Смекталія ® (Smectalia ® )"
+          ]
+        },
+        "smecta": {
+          "hits": 2,
+          "examples": [
+            "Смекта ® (Smecta ® )",
+            "Смекталія ® (Smectalia ® )"
+          ]
+        },
+        "діосмектит": {
+          "hits": 1,
+          "examples": [
+            "Діосмектит (Diosmectite)"
+          ]
+        },
+        "diosmect": {
+          "hits": 1,
+          "examples": [
+            "Діосмектит (Diosmectite)"
+          ]
+        },
+        "ентеросгель": {
+          "hits": 2,
+          "examples": [
+            "Ентеросгель (Enterosgelum)",
+            "Лактобіоентеросгель (Lactobioenterosgel)"
+          ]
+        },
+        "enterosgel": {
+          "hits": 2,
+          "examples": [
+            "Ентеросгель (Enterosgelum)",
+            "Лактобіоентеросгель (Lactobioenterosgel)"
+          ]
+        },
+        "атоксил": {
+          "hits": 0,
+          "examples": []
+        },
+        "atoxil": {
+          "hits": 2,
+          "examples": [
+            "Атоксіл (Atoxil)",
+            "Атоксіл плюс (Atoxil plus)"
+          ]
+        },
+        "полісорб": {
+          "hits": 2,
+          "examples": [
+            "Полісорбент Нео (Polisorbent Neo)",
+            "Полісорб плюс (Polysorb plus)"
+          ]
+        },
+        "polysorb": {
+          "hits": 1,
+          "examples": [
+            "Полісорб плюс (Polysorb plus)"
+          ]
+        },
+        "ентерол": {
+          "hits": 4,
+          "examples": [
+            "Ентеролакс (Enterolax)",
+            "Ентерол 250 капсули (Enterol ® 250 capsules )",
+            "Ентерол ® Імуно (Enterol Immuno)",
+            "Ентерол 250 порошок для орального застосування (Enterol ® 250 powder for oral administration )"
+          ]
+        },
+        "enterol": {
+          "hits": 4,
+          "examples": [
+            "Ентеролакс (Enterolax)",
+            "Ентерол 250 капсули (Enterol ® 250 capsules )",
+            "Ентерол ® Імуно (Enterol Immuno)",
+            "Ентерол 250 порошок для орального застосування (Enterol ® 250 powder for oral administration )"
+          ]
+        },
+        "saccharomyces": {
+          "hits": 0,
+          "examples": []
+        },
+        "лінекс": {
+          "hits": 16,
+          "examples": [
+            "Лінекс Форте ® (Linex Forte ® )",
+            "Лінекс ® (Linex ® )",
+            "Лінекс Бебі ® (Linex Baby ® )",
+            "Хустинки носові паперові Клінекс (Napkins Kleenex)",
+            "Серветки Клінекс (Kleenex wipes)"
+          ]
+        },
+        "linex": {
+          "hits": 6,
+          "examples": [
+            "Лінекс Форте ® (Linex Forte ® )",
+            "Лінекс ® (Linex ® )",
+            "Лінекс Бебі ® (Linex Baby ® )",
+            "ЛІНЕКС ® ДИТЯЧІ КРАПЛІ (LINEX ® KIDS DROPS)",
+            "Фарлінекс (Farlinex)"
+          ]
+        },
+        "регідрон": {
+          "hits": 2,
+          "examples": [
+            "Регідрон (Rehydron)",
+            "Регідрон Оптім (Rehydron Optim)"
+          ]
+        },
+        "regidron": {
+          "hits": 0,
+          "examples": []
+        },
+        "rehydrat": {
+          "hits": 3,
+          "examples": [
+            "Ізісолт фор кідс регідратант (Easysalt for kids rehydrate)",
+            "Ізісолт регідратант (Easysalt rehydrate)",
+            "Регідратон (Rehydraton)"
+          ]
+        }
+      }
+    },
+    "travel": {
+      "unique_doc_ids": 30,
+      "patterns": {
+        "ніфурокс": {
+          "hits": 11,
+          "examples": [
+            "Ніфуроксазид таблетки (Nifuroxazide tablets)",
+            "Ніфуроксазид (Nifuroxazidum)",
+            "Ніфуроксазид-Сперко капсули (Nifuroxazide-Sperco capsules )",
+            "Ніфуроксазид Ріхтер таблетки (Nifuroxazid Richter tablets )",
+            "Ніфуроксазид Алкалоїд (Nifuroxazide Alkaloid ® )"
+          ]
+        },
+        "nifurox": {
+          "hits": 11,
+          "examples": [
+            "Ніфуроксазид таблетки (Nifuroxazide tablets)",
+            "Ніфуроксазид (Nifuroxazidum)",
+            "Ніфуроксазид-Сперко капсули (Nifuroxazide-Sperco capsules )",
+            "Ніфуроксазид Ріхтер таблетки (Nifuroxazid Richter tablets )",
+            "Ніфуроксазид Алкалоїд (Nifuroxazide Alkaloid ® )"
+          ]
+        },
+        "ентерофурил": {
+          "hits": 1,
+          "examples": [
+            "Ентерофурил ® (Enterofuril)"
+          ]
+        },
+        "enterofuril": {
+          "hits": 1,
+          "examples": [
+            "Ентерофурил ® (Enterofuril)"
+          ]
+        },
+        "ерцефурил": {
+          "hits": 0,
+          "examples": []
+        },
+        "ercefur": {
+          "hits": 0,
+          "examples": []
+        },
+        "стопдіар": {
+          "hits": 1,
+          "examples": [
+            "Стопдіар (Stopdiar)"
+          ]
+        },
+        "stopdiar": {
+          "hits": 1,
+          "examples": [
+            "Стопдіар (Stopdiar)"
+          ]
+        },
+        "регідрон": {
+          "hits": 2,
+          "examples": [
+            "Регідрон (Rehydron)",
+            "Регідрон Оптім (Rehydron Optim)"
+          ]
+        },
+        "regidron": {
+          "hits": 0,
+          "examples": []
+        },
+        "rehydrat": {
+          "hits": 3,
+          "examples": [
+            "Ізісолт фор кідс регідратант (Easysalt for kids rehydrate)",
+            "Ізісолт регідратант (Easysalt rehydrate)",
+            "Регідратон (Rehydraton)"
+          ]
+        },
+        "ентерол": {
+          "hits": 4,
+          "examples": [
+            "Ентеролакс (Enterolax)",
+            "Ентерол 250 капсули (Enterol ® 250 capsules )",
+            "Ентерол ® Імуно (Enterol Immuno)",
+            "Ентерол 250 порошок для орального застосування (Enterol ® 250 powder for oral administration )"
+          ]
+        },
+        "enterol": {
+          "hits": 4,
+          "examples": [
+            "Ентеролакс (Enterolax)",
+            "Ентерол 250 капсули (Enterol ® 250 capsules )",
+            "Ентерол ® Імуно (Enterol Immuno)",
+            "Ентерол 250 порошок для орального застосування (Enterol ® 250 powder for oral administration )"
+          ]
+        },
+        "ентеросгель": {
+          "hits": 2,
+          "examples": [
+            "Ентеросгель (Enterosgelum)",
+            "Лактобіоентеросгель (Lactobioenterosgel)"
+          ]
+        },
+        "enterosgel": {
+          "hits": 2,
+          "examples": [
+            "Ентеросгель (Enterosgelum)",
+            "Лактобіоентеросгель (Lactobioenterosgel)"
+          ]
+        },
+        "полісорб": {
+          "hits": 2,
+          "examples": [
+            "Полісорбент Нео (Polisorbent Neo)",
+            "Полісорб плюс (Polysorb plus)"
+          ]
+        },
+        "polysorb": {
+          "hits": 1,
+          "examples": [
+            "Полісорб плюс (Polysorb plus)"
+          ]
+        },
+        "атоксил": {
+          "hits": 0,
+          "examples": []
+        },
+        "atoxil": {
+          "hits": 2,
+          "examples": [
+            "Атоксіл (Atoxil)",
+            "Атоксіл плюс (Atoxil plus)"
+          ]
+        },
+        "смекта": {
+          "hits": 2,
+          "examples": [
+            "Смекта ® (Smecta ® )",
+            "Смекталія ® (Smectalia ® )"
+          ]
+        },
+        "smecta": {
+          "hits": 2,
+          "examples": [
+            "Смекта ® (Smecta ® )",
+            "Смекталія ® (Smectalia ® )"
+          ]
+        }
+      }
+    }
+  }
+}

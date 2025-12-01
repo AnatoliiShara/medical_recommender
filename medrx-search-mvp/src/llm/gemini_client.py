@@ -9,7 +9,8 @@ from typing import Any, Dict, Optional
 import google.generativeai as genai
 
 
-GEMINI_DEFAULT_MODEL = os.getenv("GEMINI_MODEL_NAME", "gemini-2.5-pro")
+#GEMINI_DEFAULT_MODEL = os.getenv("GEMINI_MODEL_NAME", "gemini-2.5-pro")
+GEMINI_DEFAULT_MODEL = os.getenv("GEMINI_MODEL_NAME", "gemini-2.5-flash")
 
 
 class GeminiClientError(RuntimeError):
